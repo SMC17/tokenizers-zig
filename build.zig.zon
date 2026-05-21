@@ -1,0 +1,19 @@
+.{
+    .name = .tokenizers_zig,
+    .version = "0.0.1",
+    .fingerprint = 0xfd31b51aefa9c16d,
+    .minimum_zig_version = "0.16.0",
+    .paths = .{
+        "src",
+        "examples",
+        "bench",
+        "tests",
+        "build.zig",
+        "build.zig.zon",
+        "README.md",
+        "STATUS.md",
+        "CHANGELOG.md",
+        "LICENSE",
+    },
+    .dependencies = .{},
+}
