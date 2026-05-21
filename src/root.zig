@@ -24,6 +24,7 @@ const std = @import("std");
 
 pub const byte_level = @import("byte_level.zig");
 pub const bpe = @import("bpe.zig");
+pub const normalizer = @import("normalizer.zig");
 
 pub const Error = error{
     InvalidTokenizerJson,
@@ -32,30 +33,39 @@ pub const Error = error{
     MissingField,
 };
 
-/// High-level tokenizer assembled from a HF tokenizer.json.
+/// Pipeline configuration assembled from a HF tokenizer.json.
 pub const Tokenizer = struct {
     allocator: std.mem.Allocator,
+    /// Owned storage for normalizer string slices.
+    arena: *std.heap.ArenaAllocator,
     model: bpe.Model,
-    /// True if pre-tokenizer is ByteLevel.
+    /// True if pre-tokenizer is ByteLevel (GPT-2 / Llama-3 style).
     use_byte_level: bool,
+    /// Optional pre-BPE normalizer (Llama / Mistral SentencePiece style).
+    normalizer: normalizer.NormalizerKind,
+    /// SentencePiece space marker — when set, decoder replaces it
+    /// back to a literal space. Llama: "▁" (U+2581).
+    sp_space_marker: ?[]const u8,
 
     pub fn deinit(self: *Tokenizer) void {
         self.model.deinit();
+        self.arena.deinit();
+        self.allocator.destroy(self.arena);
     }
 
     /// Encode a UTF-8 text string into token IDs. Caller frees the
     /// returned slice.
     pub fn encode(self: *Tokenizer, alloc: std.mem.Allocator, text: []const u8) ![]u32 {
-        // For v0.0.1 we treat the entire input as a single "word" —
-        // ByteLevel BPE in HF actually splits on whitespace+punct
-        // boundaries via a regex first. We do the simpler thing and
-        // let the ByteLevel mapping handle spaces (they become Ġ).
+        // Pipeline: normalize → (byte_level encode if applicable) → BPE
+        const normalized = try normalizer.apply(alloc, self.normalizer, text);
+        defer alloc.free(normalized);
+
         if (self.use_byte_level) {
-            const encoded = try byte_level.encode(alloc, text);
+            const encoded = try byte_level.encode(alloc, normalized);
             defer alloc.free(encoded);
             return self.model.encode(alloc, encoded);
         } else {
-            return self.model.encode(alloc, text);
+            return self.model.encode(alloc, normalized);
         }
     }
 
@@ -65,6 +75,18 @@ pub const Tokenizer = struct {
         defer alloc.free(encoded);
         if (self.use_byte_level) {
             return byte_level.decode(alloc, encoded);
+        } else if (self.sp_space_marker) |marker| {
+            // SentencePiece-style: replace ▁ with " "; strip leading
+            // space if present (matches HF Llama decoder's Strip step).
+            const with_spaces = try normalizer.apply(alloc, .{
+                .replace = .{ .pattern = marker, .content = " " },
+            }, encoded);
+            if (with_spaces.len > 0 and with_spaces[0] == ' ') {
+                const trimmed = try alloc.dupe(u8, with_spaces[1..]);
+                alloc.free(with_spaces);
+                return trimmed;
+            }
+            return with_spaces;
         } else {
             return alloc.dupe(u8, encoded);
         }
@@ -73,9 +95,11 @@ pub const Tokenizer = struct {
 
 /// Build a Tokenizer from an in-memory tokenizer.json byte slice.
 pub fn fromJson(alloc: std.mem.Allocator, json_bytes: []const u8) !Tokenizer {
-    var arena = std.heap.ArenaAllocator.init(alloc);
-    defer arena.deinit();
-    const aa = arena.allocator();
+    const own_arena = try alloc.create(std.heap.ArenaAllocator);
+    errdefer alloc.destroy(own_arena);
+    own_arena.* = std.heap.ArenaAllocator.init(alloc);
+    errdefer own_arena.deinit();
+    const aa = own_arena.allocator();
 
     const parsed = std.json.parseFromSliceLeaky(std.json.Value, aa, json_bytes, .{
         .max_value_len = std.json.default_max_value_len,
@@ -175,13 +199,78 @@ pub fn fromJson(alloc: std.mem.Allocator, json_bytes: []const u8) !Tokenizer {
         }
     }
 
+    // Normalizer (optional): handle SentencePiece-style
+    // Sequence(Prepend, Replace) used by Llama / Mistral.
+    var norm_kind: normalizer.NormalizerKind = .none;
+    var sp_marker: ?[]const u8 = null;
+    if (root.get("normalizer")) |nv| {
+        if (nv == .object) {
+            norm_kind = try parseNormalizer(aa, nv.object, &sp_marker);
+        }
+    }
+
     const model = try bpe.build(alloc, vocab_entries.items, merges_entries.items, unk_id);
 
     return .{
         .allocator = alloc,
+        .arena = own_arena,
         .model = model,
         .use_byte_level = use_byte_level,
+        .normalizer = norm_kind,
+        .sp_space_marker = sp_marker,
     };
+}
+
+fn parseNormalizer(
+    aa: std.mem.Allocator,
+    obj: std.json.ObjectMap,
+    sp_marker_out: *?[]const u8,
+) !normalizer.NormalizerKind {
+    const tv = obj.get("type") orelse return Error.InvalidTokenizerJson;
+    if (tv != .string) return Error.InvalidTokenizerJson;
+    const t = tv.string;
+
+    if (std.mem.eql(u8, t, "Prepend")) {
+        const pv = obj.get("prepend") orelse return Error.InvalidTokenizerJson;
+        if (pv != .string) return Error.InvalidTokenizerJson;
+        return .{ .prepend = try aa.dupe(u8, pv.string) };
+    }
+    if (std.mem.eql(u8, t, "Replace")) {
+        const pat_v = obj.get("pattern") orelse return Error.InvalidTokenizerJson;
+        const content_v = obj.get("content") orelse return Error.InvalidTokenizerJson;
+        if (content_v != .string) return Error.InvalidTokenizerJson;
+        var pattern: []const u8 = "";
+        if (pat_v == .object) {
+            if (pat_v.object.get("String")) |sv| {
+                if (sv == .string) pattern = sv.string;
+            }
+        } else if (pat_v == .string) {
+            pattern = pat_v.string;
+        }
+        const content = content_v.string;
+        // SentencePiece detection: pattern == " ", content == U+2581
+        if (std.mem.eql(u8, pattern, " ") and std.mem.eql(u8, content, "\xE2\x96\x81")) {
+            sp_marker_out.* = try aa.dupe(u8, content);
+        }
+        return .{ .replace = .{
+            .pattern = try aa.dupe(u8, pattern),
+            .content = try aa.dupe(u8, content),
+        } };
+    }
+    if (std.mem.eql(u8, t, "Sequence")) {
+        const arr_v = obj.get("normalizers") orelse return Error.InvalidTokenizerJson;
+        if (arr_v != .array) return Error.InvalidTokenizerJson;
+        const sub_norms = try aa.alloc(normalizer.NormalizerKind, arr_v.array.items.len);
+        for (arr_v.array.items, 0..) |item, i| {
+            if (item != .object) return Error.InvalidTokenizerJson;
+            sub_norms[i] = try parseNormalizer(aa, item.object, sp_marker_out);
+        }
+        return .{ .sequence = sub_norms };
+    }
+    // Unknown normalizer type — return none rather than failing, so
+    // we degrade gracefully for tokenizers with normalizers we don't
+    // yet support.
+    return .none;
 }
 
 // ============================================================================

@@ -1,5 +1,11 @@
 zig-out/
 .zig-cache/
+.venv/
+__pycache__/
+*.pyc
+tests/fixtures/tokenizer.json
+bench/bench_rust/target/
+bench/bench_rust/Cargo.lock
 .DS_Store
 *~
 *.swp

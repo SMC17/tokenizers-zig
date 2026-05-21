@@ -15,6 +15,19 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_tests.step);
 
+    // Real TinyLlama tokenizer integration test
+    const real_mod = b.createModule(.{
+        .root_source_file = b.path("tests/test_real_tinyllama.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    real_mod.addImport("tokenizers", mod);
+    const real_tests = b.addTest(.{ .root_module = real_mod });
+    const run_real = b.addRunArtifact(real_tests);
+    test_step.dependOn(&run_real.step);
+    const real_step = b.step("test-real-tinyllama", "Real TinyLlama tokenizer test");
+    real_step.dependOn(&run_real.step);
+
     // Demo CLI: tokenize <tokenizer.json> "<text>"
     const tok_mod = b.createModule(.{
         .root_source_file = b.path("examples/tokenize.zig"),
@@ -47,4 +60,20 @@ pub fn build(b: *std.Build) void {
     run_bench.has_side_effects = true;
     const bench_step = b.step("bench", "Encode throughput bench");
     bench_step.dependOn(&run_bench.step);
+
+    // Real-tokenizer bench (Zig side of Zig-vs-Rust head-to-head)
+    const bench_real_mod = b.createModule(.{
+        .root_source_file = b.path("bench/bench_real_tinyllama.zig"),
+        .target = target,
+        .optimize = .ReleaseFast,
+    });
+    bench_real_mod.addImport("tokenizers", mod);
+    const bench_real_exe = b.addExecutable(.{
+        .name = "bench-real-tinyllama",
+        .root_module = bench_real_mod,
+    });
+    const run_bench_real = b.addRunArtifact(bench_real_exe);
+    run_bench_real.has_side_effects = true;
+    const bench_real_step = b.step("bench-real-tinyllama", "Bench real TinyLlama encode");
+    bench_real_step.dependOn(&run_bench_real.step);
 }

@@ -6,12 +6,41 @@ Zig 0.16 BPE tokenizer compatible with the HuggingFace
 
 ## Status
 
-**v0.0.1 — ByteLevel pre-tokenizer + BPE encode/decode.**
+**v0.1 — real Llama tokenizer.json + SentencePiece normalizer +
+HF Rust head-to-head bench.**
 
-The subset covered handles the canonical GPT-2 / Llama-3 / Qwen-2.5 /
-Mistral tokenization path: ByteLevel byte-to-unicode mapping +
-greedy lowest-rank merges. 20 unit tests pass against synthetic
-fixtures.
+What landed in v0.1 (on top of v0.0.1):
+- Normalizer pipeline supporting `Sequence(Prepend, Replace)` —
+  the canonical Llama / Mistral SentencePiece pre-BPE normalization
+  (prepend ▁, replace " " with ▁). Auto-detects the U+2581 space
+  marker and wires the inverse into decode.
+- Real TinyLlama-1.1B-Chat-v1.0 tokenizer.json (32K vocab + 61249
+  merges) parses + encodes + decodes round-trip. "Hello, how are
+  you today?" → [15043, 29892, 920, 526, 366, 9826, 29973] →
+  decode-back-exact, matching HF Rust tokenizers reference output.
+- 3 new integration tests against the real tokenizer.json:
+  parse-shape, known-IDs, round-trip-preservation.
+- `bench/bench_rust/` head-to-head against `huggingface/tokenizers`
+  Rust crate v0.21 with `onig` regex feature.
+
+### Head-to-head bench (consumer Linux, ReleaseFast, 123-byte sample)
+
+| Implementation | ns/encode | tokens/encode | bytes/sec |
+|---|---|---|---|
+| `huggingface/tokenizers` 0.21 (Rust) | ~55,000 | 33 | ~2.2 MB/s |
+| **tokenizers-zig v0.1** (Zig) | ~491,000 | 33 | ~250 KB/s |
+| **Ratio** | — | — | **Rust ~9x faster** |
+
+Honest loss, published as headline:
+- Rust uses hash-map-with-perfect-merge-priority + cache-line tuning.
+- Zig v0.1 uses O(n²) per-word greedy merge (find best rank in current
+  sequence, apply, repeat).
+- Same fixture, same text, same tokenization output (we verified IDs
+  match HF exactly).
+- v0.2 path = priority-queue O(n log n) merge loop, expected 3-5x
+  speedup.
+
+20 unit tests + 3 real-tokenizer integration tests pass.
 
 ## What's covered
 
