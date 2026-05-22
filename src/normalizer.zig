@@ -48,6 +48,13 @@ pub const NormalizerKind = union(enum) {
     /// Diacritical Marks block). Typically used after NFD to remove
     /// diacritics, matching BertNormalizer.strip_accents semantics.
     strip_accents: void,
+    /// BertNormalizer "handle_chinese_chars": surround each CJK
+    /// ideograph with spaces so the downstream whitespace pre-tokenize
+    /// treats each ideograph as its own word.
+    handle_chinese_chars: void,
+    /// BertNormalizer "clean_text": drop NULL / U+FFFD / control chars
+    /// (except tab/CR/LF) and replace whitespace variants with space.
+    clean_text: void,
 };
 
 /// Apply a normalizer to UTF-8 input. Caller frees output.
@@ -81,6 +88,103 @@ pub fn apply(alloc: std.mem.Allocator, norm: NormalizerKind, input: []const u8) 
         .nfkc => return unicode_norm.nfkc(alloc, input),
         .nfkd => return unicode_norm.nfkd(alloc, input),
         .strip_accents => return stripAccents(alloc, input),
+        .handle_chinese_chars => return handleChineseChars(alloc, input),
+        .clean_text => return cleanText(alloc, input),
+    };
+}
+
+/// Surround each CJK ideograph codepoint with spaces. Used by
+/// BertNormalizer.handle_chinese_chars before whitespace pre-tokenize
+/// so each ideograph becomes its own WordPiece word.
+fn handleChineseChars(alloc: std.mem.Allocator, input: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(alloc);
+    var i: usize = 0;
+    while (i < input.len) {
+        const n = std.unicode.utf8ByteSequenceLength(input[i]) catch {
+            try out.append(alloc, input[i]);
+            i += 1;
+            continue;
+        };
+        if (i + n > input.len) return Error.InvalidUtf8;
+        const cp = std.unicode.utf8Decode(input[i..][0..n]) catch {
+            try out.appendSlice(alloc, input[i..][0..n]);
+            i += n;
+            continue;
+        };
+        if (isCjkIdeograph(cp)) {
+            try out.append(alloc, ' ');
+            try out.appendSlice(alloc, input[i..][0..n]);
+            try out.append(alloc, ' ');
+        } else {
+            try out.appendSlice(alloc, input[i..][0..n]);
+        }
+        i += n;
+    }
+    return out.toOwnedSlice(alloc);
+}
+
+fn isCjkIdeograph(cp: u21) bool {
+    return switch (cp) {
+        0x4E00...0x9FFF => true, // CJK Unified Ideographs
+        0x3400...0x4DBF => true, // CJK Extension A
+        0xF900...0xFAFF => true, // CJK Compatibility Ideographs
+        // Higher planes (Ext B, C, D, E, Compatibility-Supplement) — u21
+        // is the upper limit; we'd need to widen everywhere to cover them.
+        // For v0.6 these are documented as out-of-scope.
+        else => false,
+    };
+}
+
+/// BertNormalizer.clean_text: drop NULL / U+FFFD / control chars
+/// (except tab/CR/LF) and replace any whitespace codepoint with a
+/// regular ASCII space.
+fn cleanText(alloc: std.mem.Allocator, input: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(alloc);
+    var i: usize = 0;
+    while (i < input.len) {
+        const n = std.unicode.utf8ByteSequenceLength(input[i]) catch {
+            i += 1;
+            continue;
+        };
+        if (i + n > input.len) return Error.InvalidUtf8;
+        const cp = std.unicode.utf8Decode(input[i..][0..n]) catch {
+            i += n;
+            continue;
+        };
+        if (cp == 0 or cp == 0xFFFD) {
+            // drop
+        } else if (isControl(cp)) {
+            // drop
+        } else if (isWhitespaceCp(cp)) {
+            try out.append(alloc, ' ');
+        } else {
+            try out.appendSlice(alloc, input[i..][0..n]);
+        }
+        i += n;
+    }
+    return out.toOwnedSlice(alloc);
+}
+
+fn isControl(cp: u21) bool {
+    return switch (cp) {
+        // Tab, LF, CR are whitespace per HF; explicitly exclude.
+        0x00...0x08, 0x0B, 0x0C, 0x0E...0x1F => true,
+        0x7F, 0x80...0x9F => true,
+        else => false,
+    };
+}
+
+fn isWhitespaceCp(cp: u21) bool {
+    return switch (cp) {
+        0x09, 0x0A, 0x0D, 0x20 => true,
+        0x00A0 => true, // no-break space
+        0x1680 => true, // ogham space mark
+        0x2000...0x200A => true, // en-quad through hair space
+        0x2028, 0x2029 => true,
+        0x202F, 0x205F, 0x3000 => true,
+        else => false,
     };
 }
 

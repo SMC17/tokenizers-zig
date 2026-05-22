@@ -49,7 +49,9 @@ test "real BERT-base-uncased — parses with 30522 vocab, WordPiece + lowercase 
     try std.testing.expectEqual(@as(usize, 30522), tok.model.vocabCount());
     try std.testing.expect(tok.use_whitespace_split);
     try std.testing.expect(tok.split_on_punctuation);
-    try std.testing.expect(tok.normalizer == .lowercase);
+    // BertNormalizer composes Sequence([clean_text, handle_chinese_chars,
+    // NFD, strip_accents, lowercase]) on a fully-default uncased config.
+    try std.testing.expect(tok.normalizer == .sequence);
     // BERT-base-uncased ships 5 added_tokens: [PAD], [UNK], [CLS], [SEP], [MASK]
     try std.testing.expectEqual(@as(usize, 5), tok.added_tokens.len);
 }
