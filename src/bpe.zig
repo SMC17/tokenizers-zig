@@ -27,6 +27,13 @@ pub const Error = error{
 pub const VocabEntry = struct { token: []const u8, id: u32 };
 pub const MergeEntry = struct { left: []const u8, right: []const u8, rank: u32 };
 
+/// Encoded output with byte-offset ranges per token. Used by
+/// offset-tracking callers (e.g. `Tokenizer.encodeWithOffsets`).
+pub const EncodedWithOffsets = struct {
+    ids: []u32,
+    offsets: [][2]u32,
+};
+
 pub const Model = struct {
     allocator: std.mem.Allocator,
     /// Owned storage for all vocab + merge strings. Strings inside
@@ -56,6 +63,23 @@ pub const Model = struct {
     pub fn encode(self: *const Model, alloc: std.mem.Allocator, word: []const u8) ![]u32 {
         if (word.len == 0) return alloc.alloc(u32, 0);
         return bpeEncodePQ(self, alloc, word);
+    }
+
+    /// Like encode but also returns parallel `[][2]u32 offsets` giving
+    /// the byte range of each output token in the BPE input (`word`).
+    /// Used by higher-level offset-tracking code; for ByteLevel-encoded
+    /// inputs, callers map these offsets through the ByteLevel
+    /// `input_index` table to recover original-text byte ranges.
+    pub fn encodeWithOffsets(
+        self: *const Model,
+        alloc: std.mem.Allocator,
+        word: []const u8,
+    ) !EncodedWithOffsets {
+        if (word.len == 0) return .{
+            .ids = try alloc.alloc(u32, 0),
+            .offsets = try alloc.alloc([2]u32, 0),
+        };
+        return bpeEncodePQWithOffsets(self, alloc, word);
     }
 
     /// Decode a sequence of token IDs back to a ByteLevel-encoded string.
@@ -264,6 +288,145 @@ fn bpeEncodePQ(self: *const Model, alloc: std.mem.Allocator, word: []const u8) !
     return out.toOwnedSlice(alloc);
 }
 
+// ============================================================================
+// Offset-tracking variant — same algorithm with per-node (start, end) byte
+// ranges in the BPE input space carried through merges.
+// ============================================================================
+
+const NodeO = struct {
+    piece: []const u8,
+    /// Byte range [start, end) of this piece in the BPE input `word`.
+    start: u32,
+    end: u32,
+    prev: i32,
+    next: i32,
+};
+
+fn bpeEncodePQWithOffsets(
+    self: *const Model,
+    alloc: std.mem.Allocator,
+    word: []const u8,
+) !EncodedWithOffsets {
+    var nodes: std.ArrayList(NodeO) = .empty;
+    defer nodes.deinit(alloc);
+
+    var i: usize = 0;
+    while (i < word.len) {
+        const n = try std.unicode.utf8ByteSequenceLength(word[i]);
+        if (i + n > word.len) return error.InvalidUtf8;
+        const node_idx: i32 = @intCast(nodes.items.len);
+        try nodes.append(alloc, .{
+            .piece = word[i .. i + n],
+            .start = @intCast(i),
+            .end = @intCast(i + n),
+            .prev = node_idx - 1,
+            .next = node_idx + 1,
+        });
+        i += n;
+    }
+    if (nodes.items.len == 0) return .{
+        .ids = try alloc.alloc(u32, 0),
+        .offsets = try alloc.alloc([2]u32, 0),
+    };
+    nodes.items[nodes.items.len - 1].next = -1;
+
+    var heap: std.PriorityQueue(HeapEntry, void, heapLess) = .empty;
+    defer heap.deinit(alloc);
+
+    var key_buf: std.ArrayList(u8) = .empty;
+    defer key_buf.deinit(alloc);
+
+    const tryPushMergeO = struct {
+        fn run(
+            allocator: std.mem.Allocator,
+            ns: []NodeO,
+            h: *std.PriorityQueue(HeapEntry, void, heapLess),
+            merges: *const std.StringHashMap(u32),
+            kb: *std.ArrayList(u8),
+            left_idx: i32,
+        ) !void {
+            if (left_idx < 0) return;
+            const left = ns[@intCast(left_idx)];
+            if (left.next < 0) return;
+            const right = ns[@intCast(left.next)];
+            kb.clearRetainingCapacity();
+            try kb.appendSlice(allocator, left.piece);
+            try kb.append(allocator, ' ');
+            try kb.appendSlice(allocator, right.piece);
+            if (merges.get(kb.items)) |rank| {
+                try h.push(allocator, .{
+                    .rank = rank,
+                    .left_idx = @intCast(left_idx),
+                    .left_piece_ptr = left.piece.ptr,
+                    .left_piece_len = @intCast(left.piece.len),
+                });
+            }
+        }
+    }.run;
+
+    var k: usize = 0;
+    while (k < nodes.items.len) : (k += 1) {
+        try tryPushMergeO(alloc, nodes.items, &heap, &self.merges, &key_buf, @intCast(k));
+    }
+
+    while (heap.pop()) |entry| {
+        const left_idx_usize: usize = @intCast(entry.left_idx);
+        const left = &nodes.items[left_idx_usize];
+        if (left.prev == -2) continue;
+        if (left.piece.ptr != entry.left_piece_ptr or
+            left.piece.len != entry.left_piece_len) continue;
+        if (left.next < 0) continue;
+
+        const right_idx_usize: usize = @intCast(left.next);
+        const right = &nodes.items[right_idx_usize];
+
+        key_buf.clearRetainingCapacity();
+        try key_buf.appendSlice(alloc, left.piece);
+        try key_buf.append(alloc, ' ');
+        try key_buf.appendSlice(alloc, right.piece);
+        const current_rank = self.merges.get(key_buf.items) orelse continue;
+        if (current_rank != entry.rank) continue;
+
+        const aa = self.arena.allocator();
+        const merged = try aa.alloc(u8, left.piece.len + right.piece.len);
+        @memcpy(merged[0 .. left.piece.len], left.piece);
+        @memcpy(merged[left.piece.len ..], right.piece);
+        left.piece = merged;
+        left.end = right.end; // merged range absorbs right's end
+        left.next = right.next;
+        if (right.next >= 0) {
+            nodes.items[@intCast(right.next)].prev = @intCast(entry.left_idx);
+        }
+        right.prev = -2;
+        right.next = -2;
+
+        try tryPushMergeO(alloc, nodes.items, &heap, &self.merges, &key_buf, left.prev);
+        try tryPushMergeO(alloc, nodes.items, &heap, &self.merges, &key_buf, @intCast(entry.left_idx));
+    }
+
+    var ids_out: std.ArrayList(u32) = .empty;
+    errdefer ids_out.deinit(alloc);
+    var off_out: std.ArrayList([2]u32) = .empty;
+    errdefer off_out.deinit(alloc);
+
+    var cur_idx: i32 = 0;
+    while (cur_idx >= 0 and nodes.items[@intCast(cur_idx)].prev >= 0) {
+        cur_idx = nodes.items[@intCast(cur_idx)].prev;
+    }
+    while (cur_idx >= 0) {
+        const node = nodes.items[@intCast(cur_idx)];
+        const id = self.vocab.get(node.piece) orelse if (self.unk_token) |unk| unk else return Error.UnknownToken;
+        try ids_out.append(alloc, id);
+        try off_out.append(alloc, .{ node.start, node.end });
+        cur_idx = node.next;
+    }
+
+    return .{
+        .ids = try ids_out.toOwnedSlice(alloc),
+        .offsets = try off_out.toOwnedSlice(alloc),
+    };
+}
+
 /// Build a Model from a vocab + merges list. Both are copied into an
 /// internal arena; caller's slices may be freed after init returns.
 pub fn build(
@@ -428,6 +591,81 @@ test "BPE — empty input returns empty ids" {
     const ids = try model.encode(testing.allocator, "");
     defer testing.allocator.free(ids);
     try testing.expectEqual(@as(usize, 0), ids.len);
+}
+
+test "BPE encodeWithOffsets — single chars have unit ranges" {
+    var model = try build(
+        testing.allocator,
+        &.{
+            .{ .token = "a", .id = 0 },
+            .{ .token = "b", .id = 1 },
+            .{ .token = "c", .id = 2 },
+        },
+        &.{},
+        null,
+    );
+    defer model.deinit();
+
+    const r = try model.encodeWithOffsets(testing.allocator, "abc");
+    defer testing.allocator.free(r.ids);
+    defer testing.allocator.free(r.offsets);
+    try testing.expectEqualSlices(u32, &[_]u32{ 0, 1, 2 }, r.ids);
+    try testing.expectEqual(@as(u32, 0), r.offsets[0][0]);
+    try testing.expectEqual(@as(u32, 1), r.offsets[0][1]);
+    try testing.expectEqual(@as(u32, 1), r.offsets[1][0]);
+    try testing.expectEqual(@as(u32, 2), r.offsets[1][1]);
+    try testing.expectEqual(@as(u32, 2), r.offsets[2][0]);
+    try testing.expectEqual(@as(u32, 3), r.offsets[2][1]);
+}
+
+test "BPE encodeWithOffsets — merged tokens span their input range" {
+    var model = try build(
+        testing.allocator,
+        &.{
+            .{ .token = "h", .id = 0 },
+            .{ .token = "i", .id = 1 },
+            .{ .token = "hi", .id = 2 },
+        },
+        &.{.{ .left = "h", .right = "i", .rank = 0 }},
+        null,
+    );
+    defer model.deinit();
+
+    const r = try model.encodeWithOffsets(testing.allocator, "hi");
+    defer testing.allocator.free(r.ids);
+    defer testing.allocator.free(r.offsets);
+    try testing.expectEqualSlices(u32, &[_]u32{2}, r.ids);
+    try testing.expectEqual(@as(u32, 0), r.offsets[0][0]);
+    try testing.expectEqual(@as(u32, 2), r.offsets[0][1]);
+}
+
+test "BPE encodeWithOffsets — three-piece chain offsets" {
+    var model = try build(
+        testing.allocator,
+        &.{
+            .{ .token = "h", .id = 0 },
+            .{ .token = "e", .id = 1 },
+            .{ .token = "l", .id = 2 },
+            .{ .token = "he", .id = 3 },
+            .{ .token = "hel", .id = 4 },
+            .{ .token = "ll", .id = 5 },
+            .{ .token = "hell", .id = 6 },
+        },
+        &.{
+            .{ .left = "h", .right = "e", .rank = 0 },
+            .{ .left = "l", .right = "l", .rank = 1 },
+            .{ .left = "he", .right = "ll", .rank = 2 },
+        },
+        null,
+    );
+    defer model.deinit();
+
+    const r = try model.encodeWithOffsets(testing.allocator, "hell");
+    defer testing.allocator.free(r.ids);
+    defer testing.allocator.free(r.offsets);
+    try testing.expectEqualSlices(u32, &[_]u32{6}, r.ids);
+    try testing.expectEqual(@as(u32, 0), r.offsets[0][0]);
+    try testing.expectEqual(@as(u32, 4), r.offsets[0][1]);
 }
 
 test "BPE — chained merges (3 pieces → 1)" {
