@@ -54,7 +54,7 @@ test "real BERT-base-uncased — parses with 30522 vocab, WordPiece + lowercase 
     try std.testing.expectEqual(@as(usize, 5), tok.added_tokens.len);
 }
 
-test "real BERT-base-uncased — added tokens emit their canonical IDs" {
+test "real BERT-base-uncased — encodeBase emits added tokens at their canonical IDs" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
     try skipIfMissing(io);
@@ -62,7 +62,7 @@ test "real BERT-base-uncased — added tokens emit their canonical IDs" {
     var tok = try loadTokenizer(alloc, io);
     defer tok.deinit();
 
-    // Canonical BERT-base-uncased added_token IDs from huggingface/bert-base-uncased.
+    // encodeBase skips TemplateProcessing so we see raw added-token IDs.
     const cases = [_]struct { content: []const u8, id: u32 }{
         .{ .content = "[PAD]", .id = 0 },
         .{ .content = "[UNK]", .id = 100 },
@@ -71,13 +71,13 @@ test "real BERT-base-uncased — added tokens emit their canonical IDs" {
         .{ .content = "[MASK]", .id = 103 },
     };
     for (cases) |c| {
-        const ids = try tok.encode(alloc, c.content);
+        const ids = try tok.encodeBase(alloc, c.content);
         defer alloc.free(ids);
         try std.testing.expectEqualSlices(u32, &[_]u32{c.id}, ids);
     }
 }
 
-test "real BERT-base-uncased — encodes 'hello' as canonical token 7592" {
+test "real BERT-base-uncased — encode 'hello' produces canonical [CLS,7592,SEP]" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
     try skipIfMissing(io);
@@ -85,9 +85,10 @@ test "real BERT-base-uncased — encodes 'hello' as canonical token 7592" {
     var tok = try loadTokenizer(alloc, io);
     defer tok.deinit();
 
+    // TemplateProcessing wraps base [7592] with [CLS]=101 / [SEP]=102.
     const ids = try tok.encode(alloc, "hello");
     defer alloc.free(ids);
-    try std.testing.expectEqualSlices(u32, &[_]u32{7592}, ids);
+    try std.testing.expectEqualSlices(u32, &[_]u32{ 101, 7592, 102 }, ids);
 }
 
 test "real BERT-base-uncased — lowercases input before WordPiece" {
@@ -98,7 +99,6 @@ test "real BERT-base-uncased — lowercases input before WordPiece" {
     var tok = try loadTokenizer(alloc, io);
     defer tok.deinit();
 
-    // BertNormalizer.lowercase: "Hello" → "hello" → token 7592 (same as bare "hello").
     const upper = try tok.encode(alloc, "Hello");
     defer alloc.free(upper);
     const lower = try tok.encode(alloc, "hello");
@@ -114,14 +114,13 @@ test "real BERT-base-uncased — BertPreTokenizer splits on punctuation" {
     var tok = try loadTokenizer(alloc, io);
     defer tok.deinit();
 
-    // "hello," should split into ["hello", ","] → [7592, 1010].
-    // Canonical IDs for the punctuation pieces in BERT-base-uncased vocab.
+    // "hello," → [hello, ","] base, then TemplateProcessing wraps.
     const ids = try tok.encode(alloc, "hello,");
     defer alloc.free(ids);
-    try std.testing.expectEqualSlices(u32, &[_]u32{ 7592, 1010 }, ids);
+    try std.testing.expectEqualSlices(u32, &[_]u32{ 101, 7592, 1010, 102 }, ids);
 }
 
-test "real BERT-base-uncased — canonical [CLS] hello world [SEP] sequence" {
+test "real BERT-base-uncased — encode 'hello world' produces [CLS, hello, world, SEP]" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
     try skipIfMissing(io);
@@ -129,13 +128,12 @@ test "real BERT-base-uncased — canonical [CLS] hello world [SEP] sequence" {
     var tok = try loadTokenizer(alloc, io);
     defer tok.deinit();
 
-    // Canonical: [CLS]=101, hello=7592, world=2088, [SEP]=102.
-    const ids = try tok.encode(alloc, "[CLS] hello world [SEP]");
+    const ids = try tok.encode(alloc, "hello world");
     defer alloc.free(ids);
     try std.testing.expectEqualSlices(u32, &[_]u32{ 101, 7592, 2088, 102 }, ids);
 }
 
-test "real BERT-base-uncased — encode + decode round-trip on lowercased text" {
+test "real BERT-base-uncased — encodeBase skips TemplateProcessing wrap" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
     try skipIfMissing(io);
@@ -143,11 +141,24 @@ test "real BERT-base-uncased — encode + decode round-trip on lowercased text" 
     var tok = try loadTokenizer(alloc, io);
     defer tok.deinit();
 
-    // After encode + decode the text comes back lowercased and
-    // space-separated. WordPiece's decoder rejoins ## continuations.
+    const ids = try tok.encodeBase(alloc, "hello world");
+    defer alloc.free(ids);
+    try std.testing.expectEqualSlices(u32, &[_]u32{ 7592, 2088 }, ids);
+}
+
+test "real BERT-base-uncased — encode + decode round-trip emits wrapped text" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    try skipIfMissing(io);
+
+    var tok = try loadTokenizer(alloc, io);
+    defer tok.deinit();
+
+    // Round-trip preserves the TemplateProcessing wrap because added_tokens
+    // decode emits their content verbatim.
     const ids = try tok.encode(alloc, "hello world");
     defer alloc.free(ids);
     const back = try tok.decode(alloc, ids);
     defer alloc.free(back);
-    try std.testing.expectEqualStrings("hello world", back);
+    try std.testing.expectEqualStrings("[CLS]hello world[SEP]", back);
 }

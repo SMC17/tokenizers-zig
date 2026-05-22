@@ -1,6 +1,6 @@
 .{
     .name = .tokenizers_zig,
-    .version = "0.3.0",
+    .version = "0.4.0",
     .fingerprint = 0xfd31b51aefa9c16d,
     .minimum_zig_version = "0.16.0",
     .paths = .{

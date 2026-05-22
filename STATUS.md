@@ -1,7 +1,28 @@
 # STATUS
 
-**Version:** v0.3
+**Version:** v0.4
 **Last update:** 2026-05-21
+
+## What landed in v0.4 (on top of v0.3)
+
+- **TemplateProcessing post-processor** with single-template support.
+  TinyLlama (BOS), BERT (`[CLS]/[SEP]`), T5 (EOS) all produce canonical
+  HF-wrapped IDs through `Tokenizer.encode`. Raw IDs via
+  `Tokenizer.encodeBase`.
+- **ByteFallback decoder** — `<0xXX>` token strings expand to literal
+  bytes in BPE decode (Llama family).
+- **Truncation + padding** — `max_length` / `pad_to_length` /
+  direction fields, applied post-TemplateProcessing.
+- **Unicode punctuation classifier** — ranges-based, covers ASCII +
+  Latin-1 + General Punctuation + CJK Symbols + Halfwidth/Fullwidth
+  punctuation subset.
+- **Partial Unicode normalization** (`src/unicode_norm.zig`) — NFD/NFC/
+  NFKD/NFKC over Latin-1 Supplement + Latin Extended-A. ~70 codepoints.
+- **GPT-2 regex pre-tokenize** (`src/gpt2_regex.zig`) — hand-coded
+  scanner for the canonical GPT-2 word-boundary pattern. Activated by
+  ByteLevel `use_regex: true`. ASCII + Latin-1 letter coverage.
+
+127 unit + integration tests pass.
 
 ## What landed in v0.3 (on top of v0.2)
 

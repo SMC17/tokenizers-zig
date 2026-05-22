@@ -15,6 +15,26 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_tests.step);
 
+    // gpt2_regex needs its own test runner because it's exported as
+    // its own module-internal file.
+    const gpt2_mod = b.createModule(.{
+        .root_source_file = b.path("src/gpt2_regex.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const gpt2_tests = b.addTest(.{ .root_module = gpt2_mod });
+    const run_gpt2 = b.addRunArtifact(gpt2_tests);
+    test_step.dependOn(&run_gpt2.step);
+
+    const unorm_mod = b.createModule(.{
+        .root_source_file = b.path("src/unicode_norm.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const unorm_tests = b.addTest(.{ .root_module = unorm_mod });
+    const run_unorm = b.addRunArtifact(unorm_tests);
+    test_step.dependOn(&run_unorm.step);
+
     // Real TinyLlama tokenizer integration test
     const real_mod = b.createModule(.{
         .root_source_file = b.path("tests/test_real_tinyllama.zig"),

@@ -21,10 +21,12 @@
 //!   - BertNormalizer
 
 const std = @import("std");
+const unicode_norm = @import("unicode_norm.zig");
 
 pub const Error = error{
     OutOfMemory,
     InvalidNormalizerJson,
+    InvalidUtf8,
 };
 
 pub const NormalizerKind = union(enum) {
@@ -33,8 +35,15 @@ pub const NormalizerKind = union(enum) {
     replace: struct { pattern: []const u8, content: []const u8 },
     sequence: []const NormalizerKind,
     /// ASCII lowercase (a-z → A-Z mapping). Bytes outside ASCII pass
-    /// through unchanged. Full Unicode lowercase is v0.4 work.
+    /// through unchanged. Full Unicode lowercase is v0.5 work.
     lowercase: void,
+    /// Unicode normalization forms — partial coverage (Latin-1 + Latin
+    /// Extended-A only). Codepoints outside the supported range pass
+    /// through unchanged. See src/unicode_norm.zig for the coverage table.
+    nfc: void,
+    nfd: void,
+    nfkc: void,
+    nfkd: void,
 };
 
 /// Apply a normalizer to UTF-8 input. Caller frees output.
@@ -63,6 +72,10 @@ pub fn apply(alloc: std.mem.Allocator, norm: NormalizerKind, input: []const u8) 
             for (input, 0..) |b, i| out[i] = std.ascii.toLower(b);
             return out;
         },
+        .nfc => return unicode_norm.nfc(alloc, input),
+        .nfd => return unicode_norm.nfd(alloc, input),
+        .nfkc => return unicode_norm.nfkc(alloc, input),
+        .nfkd => return unicode_norm.nfkd(alloc, input),
     };
 }
 

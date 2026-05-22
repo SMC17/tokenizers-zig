@@ -1,5 +1,103 @@
 # Changelog
 
+## 0.4.0 — 2026-05-21
+
+All six v0.4-roadmap gaps addressed in one push: TemplateProcessing,
+ByteFallback, Truncation/Padding, Unicode punctuation, partial
+NFC/NFD/NFKC/NFKD, partial GPT-2 regex pre-tokenize. 127 tests pass.
+
+### TemplateProcessing post-processor
+
+- Parses `post_processor.type == "TemplateProcessing"` and the `single`
+  template. SpecialToken ids resolved via the post-processor's
+  `special_tokens` map.
+- New `Tokenizer.encode` applies the template: `base_ids =
+  encodeBase(text); out = apply_template(base_ids)`.
+- New `Tokenizer.encodeBase` skips TemplateProcessing for callers that
+  want raw model-side IDs.
+- Real-fixture canonical IDs verified with TemplateProcessing wrap:
+  - **TinyLlama**: prepends `<s>=1` (BOS)
+  - **BERT-base-uncased**: wraps with `[CLS]=101 ... [SEP]=102`
+  - **T5-base**: appends `</s>=1` (EOS)
+
+### ByteFallback decoder
+
+- `applyByteFallback(text)` scans for `<0xXX>` 6-char patterns and
+  replaces each with the literal byte XX.
+- `Tokenizer.use_byte_fallback` set when the decoder Sequence contains
+  a ByteFallback node (Llama family).
+- Applied in BPE decode before SentencePiece marker reversal.
+
+### Truncation / padding
+
+- New fields: `max_length` + `truncation_direction` ∈ {right, left};
+  `pad_to_length` + `pad_token_id` + `padding_direction`.
+- Applied post-TemplateProcessing in this order: truncate → pad.
+
+### Unicode punctuation
+
+- `isUnicodePunct(cp)` replaces ASCII-only `isAsciiPunct` in BERT
+  pre-tokenize punctuation split. Covers:
+  - ASCII (`!`–`/`, `:`–`@`, `[`–`` ` ``, `{`–`~`)
+  - Latin-1 supplement punctuation
+  - General Punctuation (U+2000–U+206F)
+  - Supplemental Punctuation (U+2E00–U+2E7F)
+  - CJK Symbols (U+3000–U+303F)
+  - Vertical Forms, CJK Compatibility Forms, Small Form Variants
+  - Halfwidth/Fullwidth punctuation subset
+- Codepoint-aware `encodePunctSplit` (UTF-8 boundaries).
+
+### Unicode normalization — partial
+
+- New `src/unicode_norm.zig`: NFD / NFC / NFKD / NFKC for Latin-1
+  Supplement + Latin Extended-A precomposed characters (~70 entries).
+- Codepoints outside the table pass through unchanged.
+- Honest non-claims documented in the file header:
+  - No Hangul Jamo composition
+  - No CJK compatibility decompositions
+  - No combining-mark canonical reordering
+  - No multi-step decomposition recursion
+  - No composition exclusions
+  - NFKC/NFKD alias NFC/NFD for the supported subset
+- Parser: `NFC` / `NFD` / `NFKC` / `NFKD` normalizer types map to the
+  corresponding `NormalizerKind` variants. `Lowercase` and
+  `BertNormalizer.lowercase=true` continue to route to `.lowercase`.
+
+### GPT-2 regex pre-tokenize — partial
+
+- New `src/gpt2_regex.zig`: hand-coded scanner approximating the
+  canonical GPT-2 regex
+  `'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+`.
+- Activated when ByteLevel pre-tokenizer has `use_regex: true` (HF
+  default). BPE encoder splits via the regex, byte_level-encodes each
+  chunk, BPE-encodes each chunk, concatenates IDs.
+- Scope: ASCII contractions + ASCII/Latin-1 letter runs + ASCII digit
+  runs + "other" runs + whitespace runs. CJK/Cyrillic/Arabic/Indic
+  scripts fall into "other" (v0.5 work — full `\p{L}` requires Unicode
+  property tables).
+
+### Test count
+
+127 unit + integration tests pass.
+
+### Known non-claims for v0.4
+
+- Unicode normalization is Latin-only (~70 codepoints). Hangul, CJK
+  compatibility forms, and combining-mark canonical reordering are
+  unimplemented. Multilingual NFKC normalizers will not produce
+  canonical output for non-Latin input.
+- GPT-2 regex pre-tokenize classifies CJK / Cyrillic / Arabic / Indic
+  as "other" rather than letters. Differs from canonical
+  `\p{L}` for non-Latin scripts.
+- Unicode punctuation classifier uses range approximation, not full
+  `\p{P}`. Cyrillic / Arabic / Indic punctuation blocks are NOT
+  detected; v0.5 work.
+- Truncation and padding are fields the caller sets manually after
+  `fromJson`; tokenizer.json's `truncation` / `padding` objects are
+  NOT parsed automatically (they are typically null in real fixtures).
+- TemplateProcessing pair-template (`pair` field) is not yet wired —
+  only `single` is applied.
+
 ## 0.3.0 — 2026-05-21
 
 Real BERT-base-uncased + T5-base integration tests pass against
