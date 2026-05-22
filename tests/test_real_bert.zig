@@ -179,6 +179,35 @@ test "real BERT-base-uncased — encodePairWithTypes produces canonical type_ids
     try std.testing.expectEqualSlices(u8, &[_]u8{ 0, 0, 0, 1, 1 }, result.type_ids);
 }
 
+test "real BERT-base-uncased — encodeWithOffsets gives sub-token byte ranges" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    try skipIfMissing(io);
+
+    var tok = try loadTokenizer(alloc, io);
+    defer tok.deinit();
+
+    const text = "hello, world!";
+    const r = try tok.encodeWithOffsets(alloc, text);
+    defer r.deinit(alloc);
+
+    // Real BERT produces [hello=7592, ,=1010, world=2088, !=999]
+    try std.testing.expectEqualSlices(u32, &[_]u32{ 7592, 1010, 2088, 999 }, r.ids);
+    // Each token maps back to its source byte range in "hello, world!".
+    // hello = bytes [0, 5)
+    try std.testing.expectEqual(@as(u32, 0), r.offsets[0].start);
+    try std.testing.expectEqual(@as(u32, 5), r.offsets[0].end);
+    // "," = byte [5, 6)
+    try std.testing.expectEqual(@as(u32, 5), r.offsets[1].start);
+    try std.testing.expectEqual(@as(u32, 6), r.offsets[1].end);
+    // world = bytes [7, 12)
+    try std.testing.expectEqual(@as(u32, 7), r.offsets[2].start);
+    try std.testing.expectEqual(@as(u32, 12), r.offsets[2].end);
+    // "!" = byte [12, 13)
+    try std.testing.expectEqual(@as(u32, 12), r.offsets[3].start);
+    try std.testing.expectEqual(@as(u32, 13), r.offsets[3].end);
+}
+
 test "real BERT-base-uncased — encode + decode round-trip emits wrapped text" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;

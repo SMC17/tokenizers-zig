@@ -1,7 +1,20 @@
 # STATUS
 
-**Version:** v0.19
+**Version:** v0.20
 **Last update:** 2026-05-22
+
+## What landed in v0.20 (on top of v0.19)
+
+- **Real-fixture sub-token offset tests** across BERT-base-uncased,
+  T5-base, and TinyLlama-1.1B. Each test verifies that
+  `encodeWithOffsets` on a real downloaded tokenizer produces byte
+  ranges that map back to the original input correctly.
+  - BERT: "hello, world!" → 4 tokens with exact byte spans
+  - T5: "hello world" → 2 tokens with Metaspace-corrected spans
+  - TinyLlama: "Hello world" → monotonic byte spans through the
+    Llama SP-marker normalizer chain
+
+181 tests pass.
 
 ## What landed in v0.19 (on top of v0.18)
 
