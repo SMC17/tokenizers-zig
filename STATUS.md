@@ -1,7 +1,15 @@
 # STATUS
 
-**Version:** v0.21
+**Version:** v0.22
 **Last update:** 2026-05-22
+
+## What landed in v0.22 (on top of v0.21)
+
+- **`encodePairWithOffsets(a, b)`** — pair encode returning ids +
+  offsets + sequence_ids (which source each token came from). Closes
+  the BERT NSP + NER use case.
+
+183 tests pass.
 
 ## What landed in v0.21 (on top of v0.20)
 

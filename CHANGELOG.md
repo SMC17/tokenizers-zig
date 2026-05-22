@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.22.0 — 2026-05-22
+
+Pair encode with offsets — complete BERT-NSP + NER use case.
+183 tests pass.
+
+### encodePairWithOffsets
+
+- New `EncodePairWithOffsetsResult { ids, offsets, sequence_ids }`
+- `sequence_ids[i]` indicates source: 0 = sentence A, 1 = sentence B
+- Each `offsets[i]` is in that source's byte space; use sequence_ids
+  to disambiguate which input the byte range refers to
+- Verified on real BERT-base-uncased:
+  ```
+  encodePairWithOffsets("hello", "world")
+  → ids          = [101, 7592, 102, 2088, 102]
+  → sequence_ids = [0, 0, 0, 1, 1]
+  → offsets[1]   = [0, 5)  (hello in A)
+  → offsets[3]   = [0, 5)  (world in B)
+  ```
+
+### Test count
+
+183 tests pass.
+
 ## 0.21.0 — 2026-05-22
 
 Batch + parallel batch encode with offsets. API matrix complete for

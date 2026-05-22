@@ -127,6 +127,21 @@ pub const EncodeWithOffsetsResult = struct {
     }
 };
 
+/// Pair-encoded output with per-token offsets AND per-token sequence
+/// indicator (0 = A, 1 = B). Each token's offset is in the byte space
+/// of its source text (A or B); use `sequence_ids[i]` to disambiguate.
+pub const EncodePairWithOffsetsResult = struct {
+    ids: []u32,
+    offsets: []TokenOffset,
+    sequence_ids: []u8,
+
+    pub fn deinit(self: EncodePairWithOffsetsResult, alloc: std.mem.Allocator) void {
+        alloc.free(self.ids);
+        alloc.free(self.offsets);
+        alloc.free(self.sequence_ids);
+    }
+};
+
 /// Truncation strategy applied after encode + TemplateProcessing.
 pub const TruncationDirection = enum { right, left };
 
@@ -338,6 +353,74 @@ pub const Tokenizer = struct {
             };
             out[i] = r;
         }
+    }
+
+    /// Encode a sentence-pair with sub-token offsets for each token
+    /// AND per-token sequence indicator (0 = A, 1 = B). Used for
+    /// BERT NSP + NER pipelines. Caller frees via deinit.
+    pub fn encodePairWithOffsets(
+        self: *Tokenizer,
+        alloc: std.mem.Allocator,
+        text_a: []const u8,
+        text_b: []const u8,
+    ) !EncodePairWithOffsetsResult {
+        // Encode each side with offsets independently.
+        const ra = try self.encodeWithOffsets(alloc, text_a);
+        defer alloc.free(ra.ids);
+        defer alloc.free(ra.offsets);
+        const rb = try self.encodeWithOffsets(alloc, text_b);
+        defer alloc.free(rb.ids);
+        defer alloc.free(rb.offsets);
+
+        var ids_out: std.ArrayList(u32) = .empty;
+        errdefer ids_out.deinit(alloc);
+        var off_out: std.ArrayList(TokenOffset) = .empty;
+        errdefer off_out.deinit(alloc);
+        var seq_out: std.ArrayList(u8) = .empty;
+        errdefer seq_out.deinit(alloc);
+
+        if (self.template_pair) |tpl| {
+            for (tpl) |op| switch (op.kind) {
+                .append_ids => |ids| {
+                    for (ids) |id| {
+                        try ids_out.append(alloc, id);
+                        try off_out.append(alloc, .{ .start = 0, .end = 0 });
+                        try seq_out.append(alloc, op.type_id);
+                    }
+                },
+                .append_input => {
+                    for (ra.ids, ra.offsets) |id, off| {
+                        try ids_out.append(alloc, id);
+                        try off_out.append(alloc, off);
+                        try seq_out.append(alloc, op.type_id);
+                    }
+                },
+                .append_input_b => {
+                    for (rb.ids, rb.offsets) |id, off| {
+                        try ids_out.append(alloc, id);
+                        try off_out.append(alloc, off);
+                        try seq_out.append(alloc, op.type_id);
+                    }
+                },
+            };
+        } else {
+            for (ra.ids, ra.offsets) |id, off| {
+                try ids_out.append(alloc, id);
+                try off_out.append(alloc, off);
+                try seq_out.append(alloc, 0);
+            }
+            for (rb.ids, rb.offsets) |id, off| {
+                try ids_out.append(alloc, id);
+                try off_out.append(alloc, off);
+                try seq_out.append(alloc, 1);
+            }
+        }
+
+        return .{
+            .ids = try ids_out.toOwnedSlice(alloc),
+            .offsets = try off_out.toOwnedSlice(alloc),
+            .sequence_ids = try seq_out.toOwnedSlice(alloc),
+        };
     }
 
     /// Encode WITH per-token byte offsets. Each token's offset is the
