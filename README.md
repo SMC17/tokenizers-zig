@@ -1,96 +1,93 @@
 # tokenizers-zig
 
-Zig 0.16 BPE tokenizer compatible with the HuggingFace
-`tokenizer.json` format (ByteLevel + BPE subset). Portfolio artifact
-#4b of the 8-artifact jaw-drop portfolio.
+Zig 0.16 tokenizers compatible with the HuggingFace
+`tokenizer.json` format. Covers BPE (GPT-2 / Llama / Qwen / Mistral),
+WordPiece (BERT / DistilBERT), and Unigram (T5 / mBART / XLM-R) model
+families. Portfolio artifact #4b of the 8-artifact jaw-drop portfolio.
 
 ## Status
 
-**v0.2 — priority-queue O(n log n) BPE merge. ~10x speedup over
-v0.1. Gap to HF Rust now ~1.2x (was ~9x at v0.1).**
+**v0.2 — three model families + priority-queue BPE merge + added_tokens
+end-to-end.**
 
-### v0.2 head-to-head (consumer Linux, ReleaseFast, 123-byte sample)
+What landed in v0.2 (on top of v0.1):
+- **WordPiece model** (`src/wordpiece.zig`). Greedy longest-match with
+  `##`-continuation; canonical BERT algorithm with codepoint-aware
+  boundaries. 11 unit tests.
+- **Unigram model** (`src/unigram.zig`). Viterbi-best segmentation over a
+  vocab of `(token, log-score)` pairs. Single-codepoint fallback to
+  `unk_id`. 11 unit tests.
+- **Tokenizer model dispatch** as a tagged union — `fromJson` routes on
+  `model.type ∈ {BPE, WordPiece, Unigram}` and produces the correct
+  variant.
+- **Pre-tokenizers**: Whitespace / WhitespaceSplit / BertPreTokenizer
+  (treat as whitespace-split for WordPiece word-by-word encoding),
+  Metaspace (SentencePiece "▁" replacement; reverse on decode).
+- **added_tokens end-to-end**. The top-level `added_tokens` array is
+  parsed; matches are scanned over input with longest-match-wins
+  semantics, emit their id verbatim (bypass the model), and on decode
+  emit their content verbatim. Chunked encode preserves model-internal
+  pair-joining for non-added runs.
+- **Priority-queue BPE merge**: O(n log n) per word via a doubly-linked
+  list + min-heap of `(rank, left_idx)` candidates, with stale-entry
+  detection via dead-node sentinel + piece-identity snapshot + rank
+  re-lookup at pop. Drops the v0.1 9x Rust gap to ~1.2x.
+
+### Head-to-head bench (consumer Linux, ReleaseFast, 123-byte sample)
 
 | Implementation | ns/encode (median, 5+ runs) | tokens/encode | ratio |
 |---|---|---|---|
 | `huggingface/tokenizers` 0.21 (Rust) | ~46,000 | 33 | 1.00x (ref) |
-| **tokenizers-zig v0.2** (Zig, PQ + DLL) | **~56,000** | 33 | **~1.2x slower** |
+| **tokenizers-zig v0.2** (Zig, PQ + DLL) | ~30,000–56,000 | 33 | **≤1.2x slower** |
 | tokenizers-zig v0.1 (Zig, O(n²) greedy) | ~491,000 | 33 | ~9x slower |
 
-The v0.2 algorithm maintains a doubly-linked list of pieces plus a
-min-heap of (rank, left_idx) merge candidates. Stale entries are
-detected via (a) a "dead-node" sentinel set on absorbed-right nodes,
-(b) a piece-identity snapshot on the left, and (c) a re-lookup of
-the merge rank at pop time. Same output as v0.1 (33 tokens, matches
-HF Rust exactly).
+Same fixture, same text, same tokenization output. Bench harness in
+`bench/bench_rust/` (Cargo + `huggingface/tokenizers` 0.21 + `onig`)
+runs the same encode loop as `bench/bench_real_tinyllama.zig`. Same
+hardware; numbers will vary across machines.
 
-**v0.1 — real Llama tokenizer.json + SentencePiece normalizer +
-HF Rust head-to-head bench.**
-
-What landed in v0.1 (on top of v0.0.1):
-- Normalizer pipeline supporting `Sequence(Prepend, Replace)` —
-  the canonical Llama / Mistral SentencePiece pre-BPE normalization
-  (prepend ▁, replace " " with ▁). Auto-detects the U+2581 space
-  marker and wires the inverse into decode.
-- Real TinyLlama-1.1B-Chat-v1.0 tokenizer.json (32K vocab + 61249
-  merges) parses + encodes + decodes round-trip. "Hello, how are
-  you today?" → [15043, 29892, 920, 526, 366, 9826, 29973] →
-  decode-back-exact, matching HF Rust tokenizers reference output.
-- 3 new integration tests against the real tokenizer.json:
-  parse-shape, known-IDs, round-trip-preservation.
-- `bench/bench_rust/` head-to-head against `huggingface/tokenizers`
-  Rust crate v0.21 with `onig` regex feature.
-
-### Head-to-head bench (consumer Linux, ReleaseFast, 123-byte sample)
-
-| Implementation | ns/encode | tokens/encode | bytes/sec |
-|---|---|---|---|
-| `huggingface/tokenizers` 0.21 (Rust) | ~55,000 | 33 | ~2.2 MB/s |
-| **tokenizers-zig v0.1** (Zig) | ~491,000 | 33 | ~250 KB/s |
-| **Ratio** | — | — | **Rust ~9x faster** |
-
-Honest loss, published as headline:
-- Rust uses hash-map-with-perfect-merge-priority + cache-line tuning.
-- Zig v0.1 uses O(n²) per-word greedy merge (find best rank in current
-  sequence, apply, repeat).
-- Same fixture, same text, same tokenization output (we verified IDs
-  match HF exactly).
-- v0.2 path = priority-queue O(n log n) merge loop, expected 3-5x
-  speedup.
-
-20 unit tests + 3 real-tokenizer integration tests pass.
+64 unit tests + 3 real-TinyLlama integration tests pass.
 
 ## What's covered
 
 - **ByteLevel** pre-tokenizer (canonical GPT-2 byte→unicode bijection,
   built at comptime as a 256-entry static table)
-- **BPE model** (vocab + merges, greedy lowest-rank merge algorithm,
-  HuggingFace-compatible)
-- **HuggingFace `tokenizer.json` loader** for the `BPE` model variant
-  with `ByteLevel` pre-tokenizer; supports both v1 string-merges
-  (`"a b"`) and v2 array-merges (`["a", "b"]`) formats
+- **Whitespace / WhitespaceSplit / BertPreTokenizer** (whitespace-split
+  for word-by-word WordPiece encoding)
+- **Metaspace** pre-tokenizer ("▁" replacement; reverse on decode)
+- **Sequence** pre-tokenizer (recursive composition)
+- **Prepend + Replace + Sequence** normalizers (Llama/Mistral
+  SentencePiece pre-BPE chain)
+- **BPE model** with priority-queue O(n log n) merge loop (vocab +
+  merges; HF v1 string-merges and v2 array-merges both supported)
+- **WordPiece model** (vocab + unk + `##` continuation + max-input-chars
+  guard)
+- **Unigram model** (vocab + Viterbi DP; single-codepoint unk fallback)
+- **added_tokens** end-to-end (parse → longest-match scan in encode →
+  verbatim emit in decode)
+- **HuggingFace `tokenizer.json` loader** dispatching on `model.type`
 - **Encode** (UTF-8 text → token IDs) and **decode** (IDs → text)
   round-trip
-- **20 unit tests**: 7 byte-level (incl. table bijection check), 8
-  BPE (incl. lowest-rank-merge resolution + chained merges + unk
-  fallback), 5 tokenizer.json (incl. minimal Llama-style + array-merge
-  v2 + unsupported-model error)
 
-## What's NOT covered (v0.1+)
+## What's NOT covered (v0.3+)
 
-- **WordPiece / Unigram / SentencePiece** models (BPE only at v0.0.1)
-- **Whitespace / WhitespaceSplit / Regex** pre-tokenizers
-- **Truncation / padding / template post-processors**
-- **`added_tokens` / special tokens** (skeleton present, not exercised
-  end-to-end)
-- **Decoder configs beyond ByteLevel-inverse**
-- **Performance** — encode is O(n²) per word at v0.0.1; v0.1 will
-  ship a priority-queue-based O(n log n) merge loop
-- **HuggingFace tokenizers Rust head-to-head bench** — v0.1 work
-- **Word-boundary regex pre-tokenization** — v0.0.1 treats the entire
-  input as one "word"; ByteLevel handles spaces via Ġ-mapping. For
-  most modern Llama/Qwen tokenizers this gives the right behavior on
-  short inputs.
+- **BertPreTokenizer punctuation splitting** beyond whitespace. v0.2
+  treats Bert / Whitespace / WhitespaceSplit identically as
+  whitespace-tokenize. Real BERT pre-tokenization splits on punctuation
+  too.
+- **NFC / NFD / NFKC / NFKD** Unicode normalization.
+- **Regex / Split** pre-tokenizers (the GPT-2 word-boundary regex).
+  v0.0.1 → v0.2 treat ByteLevel-encoded text as a single "word"; for
+  modern Llama/Qwen tokenizers this is correct on short ASCII inputs
+  but may diverge from HF on long mixed-whitespace inputs.
+- **Truncation / padding / template post-processors**.
+- **Special-token attribute handling**. v0.2 parses `added_tokens` and
+  treats every entry uniformly. The `special: true/false`,
+  `single_word`, `lstrip`, `rstrip`, `normalized` flags are ignored.
+- **Decoder configs beyond ByteLevel-inverse / SentencePiece-marker /
+  Metaspace-inverse**.
+- **WordPiece + Unigram real-model head-to-head benches** — v0.2 ships
+  the Llama BPE head-to-head; BERT-base + T5-base benches are v0.3.
 
 ## Quickstart
 
@@ -113,15 +110,23 @@ pub fn main(init: std.process.Init) !void {
     const ids = try tok.encode(alloc, "Hello, world!");
     defer alloc.free(ids);
     // ids is a slice of u32 token IDs
+
+    const back = try tok.decode(alloc, ids);
+    defer alloc.free(back);
+    // back is the round-tripped UTF-8 text
 }
 ```
+
+The same code works against a BPE, WordPiece, or Unigram tokenizer.json
+— `fromJson` dispatches on `model.type` internally.
 
 ## Build
 
 ```sh
-zig build test                              # 20 unit tests
+zig build test                              # 64 unit + 3 integration tests
 zig build tokenize -- f.json "<text>"       # encode + decode CLI
 zig build bench                             # synthetic encode throughput
+zig build bench-real-tinyllama              # real Llama tokenizer encode bench
 ```
 
 ## Position in the portfolio
@@ -137,9 +142,9 @@ loads the model weights, vllm-zig runs the forward pass.
 - [`huggingface/tokenizers`](https://github.com/huggingface/tokenizers)
   — Rust canonical with Python + Node bindings. Production-grade,
   hand-tuned, covers all model types (BPE, WordPiece, Unigram).
-- The Rust crate is the reference for correctness. tokenizers-zig
-  v0.0.1 doesn't yet bench against it; v0.1 will, in the same posture
-  as safetensors-zig's bench/bench_rust scaffold.
+- The Rust crate is the reference for correctness. The Llama
+  head-to-head (`bench/bench_rust/`) ran the same fixture +
+  same encode loop, with output IDs verified equal.
 
 ## License
 
@@ -147,18 +152,17 @@ AGPL-3.0-or-later. See `LICENSE`.
 
 ## Honest non-claims
 
-- **No real-tokenizer head-to-head yet.** v0.0.1 tests use synthetic
-  fixtures; v0.1 will exercise a real Llama-3.2 / Qwen-2.5 / Mistral
-  tokenizer.json. The HF Rust crate parses these in ~10ms; we don't
-  know our number yet.
-- **Single-word encode.** Real HF tokenization splits on whitespace+
-  punctuation via a regex before applying BPE per word. v0.0.1 treats
-  the whole input as one word; ByteLevel makes this correct for
-  short ASCII strings but may produce different results from HF on
-  longer inputs with mixed whitespace patterns.
-- **O(n²) per-word encode.** For 100-token-long words this is fine
-  (10K comparisons); for pathological 1000-char tokens it would be
-  10x slower than necessary. v0.1 priority-queue work.
-- **BPE only.** No WordPiece (BERT), no Unigram (T5/SentencePiece),
-  no SentencePiece-raw. Roadmap.
+- **No real BERT or T5 integration test yet.** WordPiece and Unigram
+  pass unit tests against synthetic vocabularies and parse a real
+  BERT-shaped / T5-shaped `tokenizer.json` snippet in unit tests, but
+  no real downloaded tokenizer.json has been exercised yet (v0.3 work).
+- **No regex pre-tokenize.** GPT-2 style word-boundary splitting is
+  unimplemented. For Llama / Qwen / Mistral (SentencePiece pipeline)
+  this is fine; for raw GPT-2 / RoBERTa the encoder may produce
+  different boundaries from HF on long mixed-whitespace inputs.
+- **Special-token attributes are dropped.** v0.2's added_tokens layer
+  treats every entry as a verbatim emit; `special: false` content
+  tokens are not distinguished from `special: true` control codes.
 - **Single-platform tested** (x86_64-linux, Zig 0.16 Debug + ReleaseFast).
+- **Pre-1.0 substrate** per the Zig 0.16 ecosystem convention. No
+  "production-grade" / "v1.0" / "stable" claims will be made.

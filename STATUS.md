@@ -5,68 +5,91 @@
 
 ## What landed in v0.2 (on top of v0.1)
 
-- `src/bpe.zig`: replaced O(n²) greedy merge loop with O(n log n)
-  priority-queue + doubly-linked-list implementation (`bpeEncodePQ`)
-- Stale-entry detection via three layers:
-  1. "Dead node" sentinel (`prev = -2`) on right-merged-away nodes
-  2. Piece-identity snapshot on the left
-  3. Rank re-lookup at pop time (catches downstream-merged neighbors)
-- Encoding output byte-for-byte identical to v0.1 (verified: 33 tokens
-  for the 123-byte test text, same as HF Rust reference)
-- **Measured speedup: ~10x over v0.1** on the real TinyLlama bench:
-  - v0.1 (O(n²) greedy):  491 μs/encode
-  - v0.2 (O(n log n) PQ):  ~56 μs/encode (median of 5+ runs)
-- **Gap to HF Rust closed from ~9x to ~1.2x** (Rust median ~46 μs)
+### Models
 
-## What landed in v0.1 (on top of v0.0.1)
+- **`src/wordpiece.zig`** — WordPiece model (BERT / DistilBERT family).
+  Greedy longest-match with codepoint-aware boundaries and `##`
+  continuation prefix. 11 unit tests.
+- **`src/unigram.zig`** — Unigram model (T5 / mBART / XLM-R,
+  SentencePiece-style). Viterbi DP over `(token, log-score)` vocab.
+  11 unit tests.
+- **`Tokenizer.model`** is now a tagged union over `{bpe, wordpiece,
+  unigram}`. `fromJson` dispatches on `model.type`.
 
-- `src/normalizer.zig` — Prepend + Replace + Sequence normalizer
-  pipeline (~150 LOC). Detects U+2581 ▁ space marker for
-  SentencePiece-style tokenizers (Llama / Mistral family).
-- `src/root.zig` Tokenizer extended:
-  - `normalizer` field with arbitrary NormalizerKind
-  - `sp_space_marker` field; decode automatically reverses ▁ → " "
-    and strips the leading space when SP marker is detected
-  - `fromJson` parses `normalizer` object including nested
-    `Sequence` with `Prepend` + `Replace` substeps
-- `tests/test_real_tinyllama.zig` — 3 integration tests against the
-  real TinyLlama-1.1B-Chat-v1.0 tokenizer.json (32K vocab, 61249
-  merges):
-  - Parses correctly (vocab size, merge count, SP marker detected)
-  - Encodes "Hello, how are you today?" to known IDs matching HF
-  - Round-trip preserves text exactly across 3 sample sentences
-- `bench/bench_rust/` — Cargo project with `huggingface/tokenizers`
-  v0.21 + `onig` regex feature, runs the same encode loop on the
-  same fixture as the Zig bench
-- `bench/bench_real_tinyllama.zig` — Zig encode bench at the real
-  TinyLlama fixture
-- Measured head-to-head: Rust ~9x faster (55μs vs 491μs per encode
-  of a 123-byte text on consumer Linux ReleaseFast)
+### Pipeline
 
-## What's NOT covered (v0.2+)
+- **Whitespace / WhitespaceSplit / BertPreTokenizer** pre-tokenizers —
+  whitespace-tokenize for WordPiece word-by-word encoding.
+- **Metaspace** pre-tokenizer — SentencePiece "▁" replacement with
+  reverse on decode.
+- **`added_tokens` end-to-end** — parsed from top-level
+  `added_tokens` array; encode runs longest-match scan over input
+  (emit id verbatim, chunk remainder through model); decode emits
+  content verbatim while routing non-added runs through the model.
 
-1. **Priority-queue O(n log n) merge loop** — current is O(n²) per
-   word. The 9x Rust gap is mostly attributable to this; v0.2
-   should close the gap to 2-3x.
-2. **Word-boundary regex pre-tokenization** matching HF's behavior
-   for multi-word inputs with mixed whitespace
-3. **Special tokens / added_tokens** end-to-end (skeleton present,
-   not exercised)
-4. **WordPiece** model (BERT family)
-5. **Unigram / SentencePiece-raw** model (T5, Llama-1)
-6. **Other normalizers**: NFC / NFD / NFKC / NFKD / Lowercase /
-   StripAccents / Regex Replace
-7. **TemplateProcessing post-processor** (BOS/EOS template)
-8. **ByteFallback decoder** (handles <0xXX> tokens in Llama outputs)
+### Performance
+
+- **Priority-queue BPE merge** documented as the production path
+  (the `bpeEncodePQ` doubly-linked-list + min-heap was merged into
+  source in v0.1 but flagged as "v0.2 path" in docs).
+- Stale-entry detection: dead-node sentinel + piece-identity snapshot
+  + rank re-lookup at pop time.
+- ~10x faster than v0.1's O(n²) loop on the TinyLlama bench;
+  gap-to-Rust closed from ~9x to ~1.2x.
+
+## Bench (v0.2)
+
+Same fixture and methodology as v0.1. Output IDs verified equal to HF
+Rust reference.
+
+| Implementation | ns/encode (123 B, 33 tokens) | ratio |
+|---|---|---|
+| `huggingface/tokenizers` 0.21 (Rust) | ~46,000 | 1.00x |
+| **tokenizers-zig v0.2** (Zig, PQ + DLL) | ~30,000–56,000 | **≤1.2x slower** |
+| tokenizers-zig v0.1 (Zig, O(n²) greedy) | ~491,000 | ~9x slower |
+
+Consumer Linux, ReleaseFast. Variance across machines and runs.
+
+## Test count
+
+64 unit tests + 3 real-TinyLlama integration tests pass.
+
+## What's NOT covered (v0.3+)
+
+1. **BertPreTokenizer punctuation splitting** — v0.2 treats Bert /
+   Whitespace / WhitespaceSplit identically as whitespace-only
+   tokenize. Real BERT pre-tokenization also splits on punctuation and
+   applies the BertNormalizer chain.
+2. **NFC / NFD / NFKC / NFKD Unicode normalization** — required by
+   some real Unigram tokenizers (NFKC pass before Viterbi).
+3. **Regex / Split pre-tokenizers** — GPT-2 word-boundary regex is
+   not implemented. Modern Llama/Qwen tokenizers don't need it
+   (ByteLevel handles spaces via Ġ-mapping); raw GPT-2 / RoBERTa
+   may diverge from HF on long mixed-whitespace inputs.
+4. **Special-token attribute handling** — `special`, `single_word`,
+   `lstrip`, `rstrip`, `normalized` flags on `added_tokens` are
+   parsed-but-ignored. Every added_token entry emits verbatim.
+5. **Real BERT-base / T5-base integration tests** — v0.2 ships
+   synthetic + small BERT-shaped / T5-shaped tokenizer.json snippets
+   only. v0.3 will exercise downloaded real fixtures.
+6. **TemplateProcessing post-processor** (BOS/EOS template).
+7. **ByteFallback decoder** (handles `<0xXX>` tokens in some Llama
+   outputs).
+8. **Truncation / padding / template post-processors**.
 
 ## Honest non-claims
 
-- Rust upstream is ~9x faster on the real-tokenizer bench. Same fixture,
-  same correctness. Published as the README headline.
-- The v0.1 parser handles the canonical Llama / Mistral pipeline. It
-  will degrade to "no normalization" or "unknown normalizer" for
-  tokenizer.json files with normalizers we don't recognise.
-- v0.1 has no special-token-aware encode. Prefix BOS / suffix EOS
-  must be added by the caller.
-- Tested only on x86_64-linux with TinyLlama-1.1B; Qwen, Mistral,
-  GPT-2 tokenizer.json files not yet exercised end-to-end.
+- Rust upstream is ≤1.2x faster on the real-tokenizer bench. Same
+  fixture, same correctness. Published as README headline.
+- WordPiece and Unigram pass unit + synthetic-tokenizer.json tests but
+  no real BERT-base / T5-base tokenizer.json has been exercised yet.
+- Pre-1.0 substrate per Zig 0.16 ecosystem convention. No
+  "production-grade" / "v1.0" / "stable" claims.
+- Tested on x86_64-linux only.
+
+## Position in portfolio
+
+tokenizers-zig pairs with safetensors-zig (artifact #4a) as the HF
+micro-library siblings. Together they make vllm-zig (artifact #1)
+viable end-to-end: tokenizers-zig text→IDs, safetensors-zig weight
+loading, vllm-zig forward pass.
