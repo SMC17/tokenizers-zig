@@ -71,12 +71,15 @@ pub const AddedToken = struct {
     content: []const u8,
 };
 
-/// A single element of a TemplateProcessing template: either a fixed
-/// sequence of token IDs (resolved from a SpecialToken) or a marker to
-/// inject the input's encoded IDs at this position (the "A" sequence).
+/// A single element of a TemplateProcessing template:
+/// - `append_ids`: fixed sequence of token IDs (resolved from a
+///   SpecialToken via the post_processor's special_tokens map)
+/// - `append_input`: inject the "A" input's encoded IDs at this position
+/// - `append_input_b`: inject the "B" input's encoded IDs (pair-only)
 pub const TemplateOp = union(enum) {
     append_ids: []const u32,
     append_input: void,
+    append_input_b: void,
 };
 
 /// Truncation strategy applied after encode + TemplateProcessing.
@@ -119,6 +122,9 @@ pub const Tokenizer = struct {
     /// TemplateProcessing single-input template. When non-null, applied
     /// to the encoded ID sequence to wrap with BOS/EOS/CLS/SEP markers.
     template_single: ?[]const TemplateOp,
+    /// TemplateProcessing pair-input template. Applied by `encodePair`
+    /// to combine two input sequences with markers between them.
+    template_pair: ?[]const TemplateOp,
     /// True if the decoder Sequence contains a `ByteFallback` step. When
     /// set, decode replaces `<0xXX>` token strings with their literal
     /// byte values after the model's vocab lookup.
@@ -204,6 +210,18 @@ pub const Tokenizer = struct {
         return self.encodeChunk(alloc, text);
     }
 
+    /// Encode a sentence-pair into one ID sequence. Applies the
+    /// `template_pair` template if present; otherwise concatenates
+    /// `[encodeBase(a), encodeBase(b)]` with no markers. Truncation and
+    /// padding apply post-template. Caller frees.
+    pub fn encodePair(self: *Tokenizer, alloc: std.mem.Allocator, text_a: []const u8, text_b: []const u8) ![]u32 {
+        const a = try self.encodeBase(alloc, text_a);
+        defer alloc.free(a);
+        const b = try self.encodeBase(alloc, text_b);
+        defer alloc.free(b);
+        return self.applyPostProcessingPair(alloc, a, b);
+    }
+
     /// Apply TemplateProcessing → truncation → padding. Caller frees.
     fn applyPostProcessing(self: *Tokenizer, alloc: std.mem.Allocator, base: []const u32) ![]u32 {
         var out: std.ArrayList(u32) = .empty;
@@ -213,6 +231,7 @@ pub const Tokenizer = struct {
             for (tpl) |op| switch (op) {
                 .append_ids => |ids| try out.appendSlice(alloc, ids),
                 .append_input => try out.appendSlice(alloc, base),
+                .append_input_b => {}, // single template never has B
             };
         } else {
             try out.appendSlice(alloc, base);
@@ -233,6 +252,59 @@ pub const Tokenizer = struct {
         }
 
         // Padding
+        if (self.pad_to_length) |pl| {
+            if (out.items.len < pl) {
+                const need = pl - out.items.len;
+                switch (self.padding_direction) {
+                    .right => {
+                        try out.ensureUnusedCapacity(alloc, need);
+                        for (0..need) |_| out.appendAssumeCapacity(self.pad_token_id);
+                    },
+                    .left => {
+                        try out.ensureTotalCapacity(alloc, pl);
+                        const old_len = out.items.len;
+                        out.items.len = pl;
+                        std.mem.copyBackwards(u32, out.items[need..], out.items[0..old_len]);
+                        for (0..need) |i| out.items[i] = self.pad_token_id;
+                    },
+                }
+            }
+        }
+
+        return out.toOwnedSlice(alloc);
+    }
+
+    /// Like applyPostProcessing but for a sentence-pair (a, b). Uses
+    /// the `template_pair` field when present; otherwise concatenates
+    /// a then b without markers.
+    fn applyPostProcessingPair(self: *Tokenizer, alloc: std.mem.Allocator, a: []const u32, b: []const u32) ![]u32 {
+        var out: std.ArrayList(u32) = .empty;
+        errdefer out.deinit(alloc);
+
+        if (self.template_pair) |tpl| {
+            for (tpl) |op| switch (op) {
+                .append_ids => |ids| try out.appendSlice(alloc, ids),
+                .append_input => try out.appendSlice(alloc, a),
+                .append_input_b => try out.appendSlice(alloc, b),
+            };
+        } else {
+            try out.appendSlice(alloc, a);
+            try out.appendSlice(alloc, b);
+        }
+
+        if (self.max_length) |mx| {
+            if (out.items.len > mx) {
+                switch (self.truncation_direction) {
+                    .right => out.shrinkRetainingCapacity(mx),
+                    .left => {
+                        const drop = out.items.len - mx;
+                        std.mem.copyForwards(u32, out.items[0..mx], out.items[drop..]);
+                        out.shrinkRetainingCapacity(mx);
+                    },
+                }
+            }
+        }
+
         if (self.pad_to_length) |pl| {
             if (out.items.len < pl) {
                 const need = pl - out.items.len;
@@ -547,11 +619,56 @@ pub fn fromJson(alloc: std.mem.Allocator, json_bytes: []const u8) !Tokenizer {
         if (dv == .object) scanByteFallback(dv.object, &use_byte_fallback);
     }
 
-    // Post-processor (TemplateProcessing single template, if present).
+    // Post-processor (TemplateProcessing single + pair templates).
     var template_single: ?[]const TemplateOp = null;
+    var template_pair: ?[]const TemplateOp = null;
     if (root.get("post_processor")) |pv| {
         if (pv == .object) {
-            template_single = try parseTemplateSingle(aa, pv.object);
+            template_single = try parseTemplate(aa, pv.object, "single");
+            template_pair = try parseTemplate(aa, pv.object, "pair");
+        }
+    }
+
+    // Truncation (top-level `truncation` object, often null in fixtures
+    // but settable in real HF configs).
+    var max_length: ?u32 = null;
+    var truncation_direction: TruncationDirection = .right;
+    if (root.get("truncation")) |tv| {
+        if (tv == .object) {
+            if (tv.object.get("max_length")) |ml| {
+                if (ml == .integer) max_length = @intCast(ml.integer);
+            }
+            if (tv.object.get("direction")) |dv| {
+                if (dv == .string and std.mem.eql(u8, dv.string, "Left")) {
+                    truncation_direction = .left;
+                }
+            }
+        }
+    }
+
+    // Padding (top-level `padding` object).
+    var pad_to_length: ?u32 = null;
+    var pad_token_id: u32 = 0;
+    var padding_direction: PaddingDirection = .right;
+    if (root.get("padding")) |pv2| {
+        if (pv2 == .object) {
+            // Strategy may be "Fixed" with size or "BatchLongest" etc.
+            // We only support a fixed pad-to-length at v0.5.
+            if (pv2.object.get("strategy")) |sv| {
+                if (sv == .object) {
+                    if (sv.object.get("Fixed")) |fv| {
+                        if (fv == .integer) pad_to_length = @intCast(fv.integer);
+                    }
+                }
+            }
+            if (pv2.object.get("pad_id")) |pid| {
+                if (pid == .integer) pad_token_id = @intCast(pid.integer);
+            }
+            if (pv2.object.get("direction")) |dv| {
+                if (dv == .string and std.mem.eql(u8, dv.string, "Left")) {
+                    padding_direction = .left;
+                }
+            }
         }
     }
 
@@ -569,12 +686,13 @@ pub fn fromJson(alloc: std.mem.Allocator, json_bytes: []const u8) !Tokenizer {
         .added_tokens = added_tokens,
         .added_token_by_id = added_by_id,
         .template_single = template_single,
+        .template_pair = template_pair,
         .use_byte_fallback = use_byte_fallback,
-        .max_length = null,
-        .truncation_direction = .right,
-        .pad_to_length = null,
-        .pad_token_id = 0,
-        .padding_direction = .right,
+        .max_length = max_length,
+        .truncation_direction = truncation_direction,
+        .pad_to_length = pad_to_length,
+        .pad_token_id = pad_token_id,
+        .padding_direction = padding_direction,
     };
 }
 
@@ -598,21 +716,25 @@ fn scanByteFallback(obj: std.json.ObjectMap, out: *bool) void {
     }
 }
 
-/// Parse a TemplateProcessing post-processor's `single` template into
-/// a sequence of TemplateOps. SpecialToken ids are resolved via the
-/// post-processor's `special_tokens` map (`{name → {ids: [int...]}}`).
-/// Returns null if the post-processor is not TemplateProcessing or has
-/// no `single` template.
-fn parseTemplateSingle(
+/// Parse a TemplateProcessing post-processor's `template_field`
+/// template (`"single"` or `"pair"`) into a sequence of TemplateOps.
+/// SpecialToken ids are resolved via the post-processor's
+/// `special_tokens` map. Returns null if the post-processor is not
+/// TemplateProcessing or the requested field is absent.
+///
+/// For pair templates, `Sequence.id == "B"` maps to `.append_input_b`;
+/// `id == "A"` maps to `.append_input`.
+fn parseTemplate(
     aa: std.mem.Allocator,
     obj: std.json.ObjectMap,
+    template_field: []const u8,
 ) !?[]const TemplateOp {
     const tv = obj.get("type") orelse return null;
     if (tv != .string) return null;
     if (!std.mem.eql(u8, tv.string, "TemplateProcessing")) return null;
 
-    const single_v = obj.get("single") orelse return null;
-    if (single_v != .array) return null;
+    const tpl_v = obj.get(template_field) orelse return null;
+    if (tpl_v != .array) return null;
 
     const special_v = obj.get("special_tokens");
     if (special_v == null or special_v.? != .object) return null;
@@ -620,11 +742,17 @@ fn parseTemplateSingle(
 
     var ops: std.ArrayList(TemplateOp) = .empty;
     errdefer ops.deinit(aa);
-    for (single_v.array.items) |entry| {
+    for (tpl_v.array.items) |entry| {
         if (entry != .object) continue;
-        // Each entry has exactly one key: "SpecialToken" or "Sequence".
-        if (entry.object.get("Sequence")) |_| {
-            try ops.append(aa, .append_input);
+        if (entry.object.get("Sequence")) |seq_v| {
+            // Default to "A" if id missing.
+            var is_b: bool = false;
+            if (seq_v == .object) {
+                if (seq_v.object.get("id")) |idv| {
+                    if (idv == .string and std.mem.eql(u8, idv.string, "B")) is_b = true;
+                }
+            }
+            try ops.append(aa, if (is_b) .append_input_b else .append_input);
             continue;
         }
         if (entry.object.get("SpecialToken")) |st_v| {
@@ -1012,15 +1140,36 @@ fn parseNormalizer(
     if (std.mem.eql(u8, t, "NFD")) return .nfd;
     if (std.mem.eql(u8, t, "NFKC")) return .nfkc;
     if (std.mem.eql(u8, t, "NFKD")) return .nfkd;
+    if (std.mem.eql(u8, t, "StripAccents")) return .strip_accents;
     if (std.mem.eql(u8, t, "BertNormalizer")) {
         // BertNormalizer config: clean_text, handle_chinese_chars,
-        // strip_accents, lowercase. v0.3 supports lowercase only;
-        // clean_text + chinese_chars + strip_accents are no-ops.
-        var do_lower = true; // HF default
+        // strip_accents, lowercase. We support strip_accents + lowercase
+        // (composed via Sequence). clean_text + handle_chinese_chars
+        // remain v0.5+ work.
+        var do_lower = true;
+        var do_strip_accents = false;
         if (obj.get("lowercase")) |lv| {
             if (lv == .bool) do_lower = lv.bool;
         }
+        if (obj.get("strip_accents")) |sv| {
+            if (sv == .bool) do_strip_accents = sv.bool;
+            // strip_accents = null in JSON defaults to true if lowercase=true
+            // (BERT-uncased convention). Some BERT-cased configs disable it.
+        }
+        if (do_strip_accents and do_lower) {
+            const seq = try aa.alloc(normalizer.NormalizerKind, 3);
+            seq[0] = .nfd;
+            seq[1] = .strip_accents;
+            seq[2] = .lowercase;
+            return .{ .sequence = seq };
+        }
         if (do_lower) return .lowercase;
+        if (do_strip_accents) {
+            const seq = try aa.alloc(normalizer.NormalizerKind, 2);
+            seq[0] = .nfd;
+            seq[1] = .strip_accents;
+            return .{ .sequence = seq };
+        }
         return .none;
     }
     return .none;
@@ -1361,6 +1510,50 @@ test "applyByteFallback — non-pattern angle brackets pass through" {
     const out = try applyByteFallback(testing.allocator, "<unk>");
     defer testing.allocator.free(out);
     try testing.expectEqualStrings("<unk>", out);
+}
+
+test "TemplateProcessing pair — synthetic [BOS] A [SEP] B [SEP] template" {
+    const json =
+        \\{
+        \\  "version": "1.0",
+        \\  "added_tokens": [
+        \\    {"id": 1, "content": "<s>"},
+        \\    {"id": 2, "content": "<sep>"}
+        \\  ],
+        \\  "pre_tokenizer": {"type": "ByteLevel"},
+        \\  "post_processor": {
+        \\    "type": "TemplateProcessing",
+        \\    "single": [
+        \\      {"SpecialToken": {"id": "<s>", "type_id": 0}},
+        \\      {"Sequence": {"id": "A", "type_id": 0}}
+        \\    ],
+        \\    "pair": [
+        \\      {"SpecialToken": {"id": "<s>", "type_id": 0}},
+        \\      {"Sequence": {"id": "A", "type_id": 0}},
+        \\      {"SpecialToken": {"id": "<sep>", "type_id": 0}},
+        \\      {"Sequence": {"id": "B", "type_id": 1}},
+        \\      {"SpecialToken": {"id": "<sep>", "type_id": 1}}
+        \\    ],
+        \\    "special_tokens": {
+        \\      "<s>": {"id": "<s>", "ids": [1], "tokens": ["<s>"]},
+        \\      "<sep>": {"id": "<sep>", "ids": [2], "tokens": ["<sep>"]}
+        \\    }
+        \\  },
+        \\  "model": {
+        \\    "type": "BPE",
+        \\    "vocab": {"a": 0, "b": 3, "c": 4},
+        \\    "merges": []
+        \\  }
+        \\}
+    ;
+    var tok = try fromJson(testing.allocator, json);
+    defer tok.deinit();
+    try testing.expect(tok.template_pair != null);
+
+    const ids = try tok.encodePair(testing.allocator, "a", "bc");
+    defer testing.allocator.free(ids);
+    // [<s>=1, a=0, <sep>=2, b=3, c=4, <sep>=2]
+    try testing.expectEqualSlices(u32, &[_]u32{ 1, 0, 2, 3, 4, 2 }, ids);
 }
 
 test "TemplateProcessing — synthetic [BOS] + sequence template" {

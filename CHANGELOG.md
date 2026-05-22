@@ -1,5 +1,72 @@
 # Changelog
 
+## 0.5.0 — 2026-05-21
+
+TemplateProcessing pair templates, BertNormalizer strip_accents,
+truncation/padding auto-parse from tokenizer.json, Zig-side encode
+benches for all three model families. 129 tests pass.
+
+### TemplateProcessing pair
+
+- `Tokenizer.encodePair(text_a, text_b)` runs both inputs through the
+  base pipeline, then applies the `pair` template (or concatenates
+  with no markers if `pair` template is null).
+- `TemplateOp` gains an `append_input_b` variant for the "B" sequence.
+- `parseTemplate` factored to handle both `single` and `pair` fields.
+- **Real BERT pair verified**: `encodePair("hello", "world")` → `[101,
+  7592, 102, 2088, 102]` (`[CLS] hello [SEP] world [SEP]`).
+
+### BertNormalizer strip_accents
+
+- New `.strip_accents` normalizer kind drops U+0300–U+036F (Combining
+  Diacritical Marks). Composes with NFD: `[NFD, strip_accents]` turns
+  "résumé" into "resume".
+- `BertNormalizer` parser composes the chain when `strip_accents=true`:
+  - both flags: `Sequence([NFD, strip_accents, lowercase])`
+  - lowercase only: `lowercase` (existing behaviour)
+  - strip_accents only: `Sequence([NFD, strip_accents])`
+- Standalone `StripAccents` normalizer type also parsed.
+
+### Truncation / padding auto-parse
+
+- `fromJson` now reads the top-level `truncation` and `padding` objects:
+  - `truncation.max_length` + `truncation.direction` ∈ {"Right", "Left"}
+  - `padding.strategy.Fixed` + `padding.pad_id` + `padding.direction`
+- Default behavior unchanged when these fields are absent (which is
+  the case for all three real fixtures — they ship `truncation: null`,
+  `padding: null` and rely on the caller to opt in).
+
+### Encode benches (Zig-side, three model families)
+
+Same 123-byte test text across all three. Consumer Linux, ReleaseFast,
+1000 iterations median:
+
+| Model family | ns/encode | tokens/encode | MB/s |
+|---|---|---|---|
+| WordPiece (BERT-base-uncased) | ~15,460 | 29 | 7 |
+| Unigram (T5-base) | ~38,796 | 34 | 3 |
+| BPE+SentencePiece (TinyLlama-1.1B) | ~45,211 | 34 | 2 |
+
+WordPiece is fastest (simple greedy longest-match, no DP / no PQ).
+Unigram and BPE-SP are close to each other; both do per-codepoint
+Viterbi/heap work. Rust head-to-head is for BPE only (see v0.2);
+BERT + T5 Rust-side benches are v0.6 work.
+
+`zig build bench-real-bert` / `bench-real-t5` / `bench-real-tinyllama`.
+
+### Test count
+
+129 unit + integration tests pass.
+
+### Known non-claims for v0.5
+
+- Rust-side benches for WordPiece + Unigram are not yet wired up. The
+  `bench/bench_rust/` Cargo project still only covers BPE.
+- TemplateProcessing pair only handles `Sequence.id == "A"` and `"B"`.
+  Other custom `type_id` values are honoured at parse but ignored at
+  apply time (no per-token type-id output yet — that's the
+  `token_type_ids` array which we don't return).
+
 ## 0.4.0 — 2026-05-21
 
 All six v0.4-roadmap gaps addressed in one push: TemplateProcessing,

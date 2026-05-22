@@ -1,7 +1,25 @@
 # STATUS
 
-**Version:** v0.4
+**Version:** v0.5
 **Last update:** 2026-05-21
+
+## What landed in v0.5 (on top of v0.4)
+
+- **TemplateProcessing pair templates** — `encodePair(a, b)` produces
+  HF-canonical wrapped output (verified `[CLS] hello [SEP] world [SEP]`
+  on real BERT).
+- **BertNormalizer.strip_accents** — new `.strip_accents` normalizer
+  drops Combining Diacritical Marks. Composes with NFD to turn
+  "résumé" into "resume". `BertNormalizer` parser auto-composes
+  `Sequence([NFD, strip_accents, lowercase])` when both flags set.
+- **Truncation / padding auto-parse** from top-level `truncation` /
+  `padding` objects in tokenizer.json. Defaults preserved for
+  fixtures that ship null (the common case).
+- **BERT + T5 Zig encode benches** — `bench-real-bert` (15μs / 29
+  tokens) and `bench-real-t5` (38μs / 34 tokens) on the standard
+  123-byte fixture.
+
+129 unit + integration tests pass.
 
 ## What landed in v0.4 (on top of v0.3)
 

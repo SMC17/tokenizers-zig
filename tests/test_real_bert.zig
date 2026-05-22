@@ -146,6 +146,20 @@ test "real BERT-base-uncased — encodeBase skips TemplateProcessing wrap" {
     try std.testing.expectEqualSlices(u32, &[_]u32{ 7592, 2088 }, ids);
 }
 
+test "real BERT-base-uncased — encodePair wraps with [CLS] A [SEP] B [SEP]" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    try skipIfMissing(io);
+
+    var tok = try loadTokenizer(alloc, io);
+    defer tok.deinit();
+
+    // Canonical: [CLS] hello [SEP] world [SEP]
+    const ids = try tok.encodePair(alloc, "hello", "world");
+    defer alloc.free(ids);
+    try std.testing.expectEqualSlices(u32, &[_]u32{ 101, 7592, 102, 2088, 102 }, ids);
+}
+
 test "real BERT-base-uncased — encode + decode round-trip emits wrapped text" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
