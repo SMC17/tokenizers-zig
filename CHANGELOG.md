@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.21.0 — 2026-05-22
+
+Batch + parallel batch encode with offsets. API matrix complete for
+the offset surface. 182 tests pass.
+
+### encodeBatchWithOffsets + encodeBatchParallelWithOffsets
+
+- `encodeBatchWithOffsets(texts) → []EncodeWithOffsetsResult`
+- `encodeBatchParallelWithOffsets(texts, n_threads) → []EncodeWithOffsetsResult`
+- Parallel variant uses std.Thread fan-out; falls through to
+  sequential when `n_threads <= 1`.
+- Output verified byte-identical between sequential and parallel
+  paths in tests.
+- `freeBatchWithOffsets` helper for cleanup.
+
+### Test count
+
+182 tests pass.
+
 ## 0.20.0 — 2026-05-22
 
 Real-fixture integration tests for sub-token offsets across all

@@ -253,6 +253,93 @@ pub const Tokenizer = struct {
         return self.applyPostProcessing(alloc, base);
     }
 
+    /// Batch encode with per-token byte offsets. Returns an array of
+    /// `EncodeWithOffsetsResult` aligned with `texts`. Caller frees via
+    /// `freeBatchWithOffsets`.
+    pub fn encodeBatchWithOffsets(
+        self: *Tokenizer,
+        alloc: std.mem.Allocator,
+        texts: []const []const u8,
+    ) ![]EncodeWithOffsetsResult {
+        const out = try alloc.alloc(EncodeWithOffsetsResult, texts.len);
+        errdefer alloc.free(out);
+        var done: usize = 0;
+        errdefer for (out[0..done]) |r| r.deinit(alloc);
+        for (texts, 0..) |t, i| {
+            out[i] = try self.encodeWithOffsets(alloc, t);
+            done = i + 1;
+        }
+        return out;
+    }
+
+    pub fn freeBatchWithOffsets(alloc: std.mem.Allocator, batch: []EncodeWithOffsetsResult) void {
+        for (batch) |r| r.deinit(alloc);
+        alloc.free(batch);
+    }
+
+    /// Parallel variant of `encodeBatchWithOffsets`. `n_threads <= 1`
+    /// falls through to sequential.
+    pub fn encodeBatchParallelWithOffsets(
+        self: *Tokenizer,
+        alloc: std.mem.Allocator,
+        texts: []const []const u8,
+        n_threads: usize,
+    ) ![]EncodeWithOffsetsResult {
+        if (n_threads <= 1 or texts.len <= 1) return self.encodeBatchWithOffsets(alloc, texts);
+
+        const out = try alloc.alloc(EncodeWithOffsetsResult, texts.len);
+        errdefer alloc.free(out);
+        const errs = try alloc.alloc(?anyerror, n_threads);
+        defer alloc.free(errs);
+        @memset(errs, null);
+        const workers = try alloc.alloc(std.Thread, n_threads);
+        defer alloc.free(workers);
+
+        const chunk = (texts.len + n_threads - 1) / n_threads;
+        var spawned: usize = 0;
+        var t: usize = 0;
+        while (t < n_threads) : (t += 1) {
+            const s = t * chunk;
+            if (s >= texts.len) break;
+            const e = @min(s + chunk, texts.len);
+            workers[spawned] = try std.Thread.spawn(.{}, encodeBatchOffsetsWorker, .{
+                self, alloc, texts[s..e], out[s..e], &errs[t],
+            });
+            spawned += 1;
+        }
+
+        var i: usize = 0;
+        while (i < spawned) : (i += 1) workers[i].join();
+
+        for (errs) |e| if (e) |err| {
+            for (out) |r| if (r.ids.len != 0 or r.offsets.len != 0) r.deinit(alloc);
+            alloc.free(out);
+            return err;
+        };
+        return out;
+    }
+
+    fn encodeBatchOffsetsWorker(
+        tok: *Tokenizer,
+        alloc: std.mem.Allocator,
+        texts: []const []const u8,
+        out: []EncodeWithOffsetsResult,
+        err_out: *?anyerror,
+    ) void {
+        for (texts, 0..) |t, i| {
+            const r = tok.encodeWithOffsets(alloc, t) catch |e| {
+                err_out.* = e;
+                var j = i;
+                while (j < out.len) : (j += 1) out[j] = .{
+                    .ids = &[_]u32{},
+                    .offsets = &[_]TokenOffset{},
+                };
+                return;
+            };
+            out[i] = r;
+        }
+    }
+
     /// Encode WITH per-token byte offsets. Each token's offset is the
     /// byte range of the *chunk* it came from (whitespace + punctuation
     /// split word for WordPiece pipelines, full text for non-split
@@ -2640,6 +2727,38 @@ test "encodeBatchParallel — produces same output as encodeBatch (4 threads)" {
 
     try testing.expectEqual(seq.len, par.len);
     for (seq, par) |s, p| try testing.expectEqualSlices(u32, s, p);
+}
+
+test "encodeBatchParallelWithOffsets — matches sequential output (4 threads)" {
+    const json =
+        \\{
+        \\  "version": "1.0",
+        \\  "pre_tokenizer": {"type": "ByteLevel"},
+        \\  "model": {
+        \\    "type": "BPE",
+        \\    "vocab": {"a": 0, "b": 1, "c": 2, "ab": 3, "abc": 4},
+        \\    "merges": ["a b", "ab c"]
+        \\  }
+        \\}
+    ;
+    var tok = try fromJson(testing.allocator, json);
+    defer tok.deinit();
+
+    const texts = [_][]const u8{ "a", "ab", "abc", "abca", "cab", "ba" };
+    const seq = try tok.encodeBatchWithOffsets(testing.allocator, &texts);
+    defer Tokenizer.freeBatchWithOffsets(testing.allocator, seq);
+    const par = try tok.encodeBatchParallelWithOffsets(testing.allocator, &texts, 4);
+    defer Tokenizer.freeBatchWithOffsets(testing.allocator, par);
+
+    try testing.expectEqual(seq.len, par.len);
+    for (seq, par) |s, p| {
+        try testing.expectEqualSlices(u32, s.ids, p.ids);
+        try testing.expectEqual(s.offsets.len, p.offsets.len);
+        for (s.offsets, p.offsets) |so, po| {
+            try testing.expectEqual(so.start, po.start);
+            try testing.expectEqual(so.end, po.end);
+        }
+    }
 }
 
 test "encodeWithOffsets — BPE+SP marker (Llama-style) sub-token offsets" {
