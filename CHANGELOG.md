@@ -1,5 +1,48 @@
 # Changelog
 
+## 0.19.0 — 2026-05-22
+
+Sub-token offsets for BPE+SP marker (Llama, Mistral) via normalizer
+offset tracking. ALL FOUR major HF pipelines now produce true
+sub-token byte ranges. 178 tests pass.
+
+### normalizer.applyWithOffsets
+
+- Returns parallel `output` + `input_index` table where each output
+  byte is either:
+  - A real input byte index (1:1 mapping for non-modified bytes)
+  - `SYNTHETIC` sentinel (introduced by Prepend, Replace content, etc.)
+- Fully supports: `none`, `prepend`, `replace`, `sequence` composition,
+  `lowercase` (identity).
+- Falls back to linear interpolation for unsupported normalizers
+  (NFC/NFD/strip_accents/handle_chinese_chars/clean_text) —
+  approximate but always returns SOMETHING.
+
+### Tokenizer.encodeWithOffsets — BPE+SP marker path
+
+- Pipeline: `normalizer.applyWithOffsets → bpe.encodeWithOffsets →
+  remap each BPE token's byte range through input_index, walking
+  past SYNTHETIC bytes to find first/last real input positions`.
+- Verified: encoding "hi" with `Sequence(Prepend("▁"), Replace(" "→"▁"))`
+  + vocab/merges that produce `▁hi` as one token → offset `[0, 2]` in
+  original "hi" input.
+
+### Sub-token offset coverage matrix (now complete)
+
+| Pipeline | Sub-token offsets |
+|---|---|
+| WordPiece + BertPreTokenizer | ✓ |
+| BPE + ByteLevel | ✓ |
+| Unigram + Metaspace | ✓ |
+| **BPE + SP marker (Llama / Mistral)** | **✓ (v0.19)** |
+
+All four major HF tokenizer pipelines produce true NER-grade
+sub-token byte offsets in the original input.
+
+### Test count
+
+178 tests pass.
+
 ## 0.18.0 — 2026-05-22
 
 Sub-token offsets for Unigram+Metaspace (T5 pipeline). All three model

@@ -1,7 +1,27 @@
 # STATUS
 
-**Version:** v0.18
+**Version:** v0.19
 **Last update:** 2026-05-22
+
+## What landed in v0.19 (on top of v0.18)
+
+- **`normalizer.applyWithOffsets`** — output + input_index parallel
+  arrays, with `SYNTHETIC` sentinel for introduced bytes. Fully
+  supports `Prepend / Replace / Sequence / Lowercase` (the Llama chain).
+- **`Tokenizer.encodeWithOffsets` BPE+SP marker path** — Llama / Mistral
+  pipelines now produce sub-token byte ranges via normalizer-offsets →
+  BPE-offsets → remap.
+
+### Sub-token offset coverage matrix (now complete across all 4 pipelines)
+
+| Pipeline | Sub-token offsets |
+|---|---|
+| WordPiece + BertPreTokenizer | ✓ |
+| BPE + ByteLevel (GPT-2/Qwen/RoBERTa) | ✓ |
+| Unigram + Metaspace (T5/mBART) | ✓ |
+| **BPE + SP marker (Llama/Mistral)** | **✓ (v0.19)** |
+
+178 tests pass.
 
 ## What landed in v0.18 (on top of v0.17)
 

@@ -57,6 +57,125 @@ pub const NormalizerKind = union(enum) {
     clean_text: void,
 };
 
+/// Sentinel value in an `input_index` table marking a synthetic output
+/// byte (introduced by Prepend, Replace content, handle_chinese_chars
+/// spaces, etc.) that has no source position in the input.
+pub const SYNTHETIC: u32 = std.math.maxInt(u32);
+
+/// Apply with per-output-byte input-index tracking. Used for offset
+/// tracking through Prepend / Replace / Sequence / Lowercase chains
+/// (the typical Llama / Mistral normalizer pipeline). For unsupported
+/// normalizers (NFC/NFD/strip_accents/handle_chinese_chars/clean_text)
+/// the input_index is approximate. Caller frees both slices.
+pub fn applyWithOffsets(
+    alloc: std.mem.Allocator,
+    norm: NormalizerKind,
+    input: []const u8,
+) !struct { output: []u8, input_index: []u32 } {
+    switch (norm) {
+        .none => {
+            const out = try alloc.dupe(u8, input);
+            const idx = try alloc.alloc(u32, input.len);
+            for (0..input.len) |i| idx[i] = @intCast(i);
+            return .{ .output = out, .input_index = idx };
+        },
+        .prepend => |prefix| {
+            const out = try alloc.alloc(u8, prefix.len + input.len);
+            @memcpy(out[0..prefix.len], prefix);
+            @memcpy(out[prefix.len..], input);
+            const idx = try alloc.alloc(u32, out.len);
+            for (0..prefix.len) |i| idx[i] = SYNTHETIC;
+            for (0..input.len) |i| idx[prefix.len + i] = @intCast(i);
+            return .{ .output = out, .input_index = idx };
+        },
+        .replace => |r| {
+            if (r.pattern.len == 0) return applyWithOffsets(alloc, .none, input);
+            var out: std.ArrayList(u8) = .empty;
+            errdefer out.deinit(alloc);
+            var idx: std.ArrayList(u32) = .empty;
+            errdefer idx.deinit(alloc);
+            var i: usize = 0;
+            while (i < input.len) {
+                if (i + r.pattern.len <= input.len and
+                    std.mem.eql(u8, input[i .. i + r.pattern.len], r.pattern))
+                {
+                    // Replace: content bytes are synthetic (or could map
+                    // to first matched input byte; HF marks them synthetic).
+                    try out.appendSlice(alloc, r.content);
+                    for (0..r.content.len) |_| try idx.append(alloc, SYNTHETIC);
+                    i += r.pattern.len;
+                } else {
+                    try out.append(alloc, input[i]);
+                    try idx.append(alloc, @intCast(i));
+                    i += 1;
+                }
+            }
+            return .{
+                .output = try out.toOwnedSlice(alloc),
+                .input_index = try idx.toOwnedSlice(alloc),
+            };
+        },
+        .sequence => |seq| {
+            // Apply step-by-step, composing offset tables.
+            // step output's byte i → step input byte step_idx[i]
+            // → input byte input_idx[step_idx[i]] (if not SYNTHETIC).
+            var current_out: []u8 = try alloc.dupe(u8, input);
+            errdefer alloc.free(current_out);
+            var current_idx: []u32 = try alloc.alloc(u32, input.len);
+            errdefer alloc.free(current_idx);
+            for (0..input.len) |i| current_idx[i] = @intCast(i);
+
+            for (seq) |step| {
+                const r = try applyWithOffsets(alloc, step, current_out);
+                // Compose: for each byte in r.output, r.input_index[k] gives
+                // the byte in current_out (the step's input). Map through
+                // current_idx to get the original input byte.
+                const new_idx = try alloc.alloc(u32, r.output.len);
+                for (r.input_index, 0..) |stepi, k| {
+                    if (stepi == SYNTHETIC) {
+                        new_idx[k] = SYNTHETIC;
+                    } else if (stepi < current_idx.len) {
+                        new_idx[k] = current_idx[stepi];
+                    } else {
+                        new_idx[k] = SYNTHETIC;
+                    }
+                }
+                alloc.free(current_out);
+                alloc.free(current_idx);
+                alloc.free(r.input_index);
+                current_out = r.output;
+                current_idx = new_idx;
+            }
+            return .{ .output = current_out, .input_index = current_idx };
+        },
+        .lowercase => {
+            const out = try alloc.alloc(u8, input.len);
+            for (input, 0..) |b, i| out[i] = std.ascii.toLower(b);
+            const idx = try alloc.alloc(u32, input.len);
+            for (0..input.len) |i| idx[i] = @intCast(i);
+            return .{ .output = out, .input_index = idx };
+        },
+        else => {
+            // Unsupported normalizer for offset tracking: fall back to
+            // applying without offsets and approximating identity.
+            const out = try apply(alloc, norm, input);
+            const idx = try alloc.alloc(u32, out.len);
+            // Best-effort linear interpolation: out[i] ≈ input[i*input.len/out.len]
+            if (out.len == 0) {
+                return .{ .output = out, .input_index = idx };
+            }
+            if (input.len == 0) {
+                for (0..out.len) |i| idx[i] = SYNTHETIC;
+            } else {
+                for (0..out.len) |i| {
+                    idx[i] = @intCast((i * input.len) / out.len);
+                }
+            }
+            return .{ .output = out, .input_index = idx };
+        },
+    }
+}
+
 /// Apply a normalizer to UTF-8 input. Caller frees output.
 pub fn apply(alloc: std.mem.Allocator, norm: NormalizerKind, input: []const u8) ![]u8 {
     return switch (norm) {
@@ -301,6 +420,28 @@ test "empty input survives" {
     const r = try apply(testing.allocator, .{ .prepend = "X" }, "");
     defer testing.allocator.free(r);
     try testing.expectEqualStrings("X", r);
+}
+
+test "applyWithOffsets — Llama Sequence(Prepend, Replace) tracks input mapping" {
+    const sub_norms = [_]NormalizerKind{
+        .{ .prepend = "\u{2581}" },
+        .{ .replace = .{ .pattern = " ", .content = "\u{2581}" } },
+    };
+    const r = try applyWithOffsets(testing.allocator, .{ .sequence = &sub_norms }, "hi there");
+    defer testing.allocator.free(r.output);
+    defer testing.allocator.free(r.input_index);
+    // "hi there" → prepend ▁ → "▁hi there" → replace " " → "▁hi▁there"
+    // 3 synthetic + h(0) + i(1) + 3 synthetic + t(3) + h(4) + e(5) + r(6) + e(7)
+    try testing.expectEqualStrings("\u{2581}hi\u{2581}there", r.output);
+    try testing.expectEqual(SYNTHETIC, r.input_index[0]); // ▁
+    try testing.expectEqual(SYNTHETIC, r.input_index[1]);
+    try testing.expectEqual(SYNTHETIC, r.input_index[2]);
+    try testing.expectEqual(@as(u32, 0), r.input_index[3]); // h
+    try testing.expectEqual(@as(u32, 1), r.input_index[4]); // i
+    try testing.expectEqual(SYNTHETIC, r.input_index[5]); // ▁ (was space)
+    try testing.expectEqual(SYNTHETIC, r.input_index[6]);
+    try testing.expectEqual(SYNTHETIC, r.input_index[7]);
+    try testing.expectEqual(@as(u32, 3), r.input_index[8]); // t
 }
 
 test "lowercase ASCII works" {
