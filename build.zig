@@ -74,6 +74,19 @@ pub fn build(b: *std.Build) void {
     const t5_step = b.step("test-real-t5", "Real T5-base tokenizer test");
     t5_step.dependOn(&run_t5.step);
 
+    // Property-based fuzz invariants over all three real fixtures.
+    const fuzz_mod = b.createModule(.{
+        .root_source_file = b.path("tests/test_fuzz_invariants.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    fuzz_mod.addImport("tokenizers", mod);
+    const fuzz_tests = b.addTest(.{ .root_module = fuzz_mod });
+    const run_fuzz = b.addRunArtifact(fuzz_tests);
+    test_step.dependOn(&run_fuzz.step);
+    const fuzz_step = b.step("test-fuzz", "Property-based invariant fuzzer");
+    fuzz_step.dependOn(&run_fuzz.step);
+
     // Demo CLI: tokenize <tokenizer.json> "<text>"
     const tok_mod = b.createModule(.{
         .root_source_file = b.path("examples/tokenize.zig"),
