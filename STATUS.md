@@ -1,7 +1,20 @@
 # STATUS
 
-**Version:** v0.11
+**Version:** v0.12
 **Last update:** 2026-05-22
+
+## What landed in v0.12 (on top of v0.11)
+
+- **Hangul Jamo algorithmic NFD/NFC** — Unicode Standard Annex #15
+  algorithm; no table lookup. `한국어 각` round-trips.
+- **Greek monotonic** — Ά Έ Ή Ί Ό Ύ Ώ + lowercase + diaeresis combos.
+- **Cyrillic** — Ё ё Ѝ ѝ Ў ў Й й.
+- **u3 overflow fix** in NFC Hangul LVT branch (widens to usize).
+
+Round-trip verified: `"Άθήνα 한국어 résumé"` decomposes through partial
+NFD and reassembles byte-identical via NFC.
+
+161 tests pass.
 
 ## What landed in v0.11 (on top of v0.10)
 

@@ -192,6 +192,36 @@ fn decompose(cp: u21) ?[2]u21 {
         0x017C => .{ 0x007A, 0x0307 }, // ż
         0x017D => .{ 0x005A, 0x030C }, // Ž
         0x017E => .{ 0x007A, 0x030C }, // ž
+        // Greek monotonic precomposed → base + combining mark
+        0x0386 => .{ 0x0391, 0x0301 }, // Ά
+        0x0388 => .{ 0x0395, 0x0301 }, // Έ
+        0x0389 => .{ 0x0397, 0x0301 }, // Ή
+        0x038A => .{ 0x0399, 0x0301 }, // Ί
+        0x038C => .{ 0x039F, 0x0301 }, // Ό
+        0x038E => .{ 0x03A5, 0x0301 }, // Ύ
+        0x038F => .{ 0x03A9, 0x0301 }, // Ώ
+        0x03AC => .{ 0x03B1, 0x0301 }, // ά
+        0x03AD => .{ 0x03B5, 0x0301 }, // έ
+        0x03AE => .{ 0x03B7, 0x0301 }, // ή
+        0x03AF => .{ 0x03B9, 0x0301 }, // ί
+        0x03CC => .{ 0x03BF, 0x0301 }, // ό
+        0x03CD => .{ 0x03C5, 0x0301 }, // ύ
+        0x03CE => .{ 0x03C9, 0x0301 }, // ώ
+        0x0390 => .{ 0x03B9, 0x0344 }, // ΐ (dialytika tonos)
+        0x03B0 => .{ 0x03C5, 0x0344 }, // ΰ
+        0x03AA => .{ 0x0399, 0x0308 }, // Ϊ
+        0x03AB => .{ 0x03A5, 0x0308 }, // Ϋ
+        0x03CA => .{ 0x03B9, 0x0308 }, // ϊ
+        0x03CB => .{ 0x03C5, 0x0308 }, // ϋ
+        // Cyrillic with diacritics — common entries
+        0x0401 => .{ 0x0415, 0x0308 }, // Ё
+        0x0451 => .{ 0x0435, 0x0308 }, // ё
+        0x040D => .{ 0x0418, 0x0300 }, // Ѝ
+        0x045D => .{ 0x0438, 0x0300 }, // ѝ
+        0x040E => .{ 0x0423, 0x0306 }, // Ў
+        0x045E => .{ 0x0443, 0x0306 }, // ў
+        0x0419 => .{ 0x0418, 0x0306 }, // Й
+        0x0439 => .{ 0x0438, 0x0306 }, // й
         else => null,
     };
 }
@@ -352,6 +382,47 @@ fn compose(base: u21, mark: u21) ?u21 {
             0x0301 => 0x017A, 0x0307 => 0x017C, 0x030C => 0x017E,
             else => null,
         },
+        // Greek uppercase
+        0x0391 => switch (mark) { 0x0301 => 0x0386, else => null }, // Α
+        0x0395 => switch (mark) { 0x0301 => 0x0388, else => null }, // Ε
+        0x0397 => switch (mark) { 0x0301 => 0x0389, else => null }, // Η
+        0x0399 => switch (mark) { // Ι
+            0x0301 => 0x038A, 0x0308 => 0x03AA,
+            else => null,
+        },
+        0x039F => switch (mark) { 0x0301 => 0x038C, else => null }, // Ο
+        0x03A5 => switch (mark) { // Υ
+            0x0301 => 0x038E, 0x0308 => 0x03AB,
+            else => null,
+        },
+        0x03A9 => switch (mark) { 0x0301 => 0x038F, else => null }, // Ω
+        // Greek lowercase
+        0x03B1 => switch (mark) { 0x0301 => 0x03AC, else => null }, // α
+        0x03B5 => switch (mark) { 0x0301 => 0x03AD, else => null }, // ε
+        0x03B7 => switch (mark) { 0x0301 => 0x03AE, else => null }, // η
+        0x03B9 => switch (mark) { // ι
+            0x0301 => 0x03AF, 0x0308 => 0x03CA, 0x0344 => 0x0390,
+            else => null,
+        },
+        0x03BF => switch (mark) { 0x0301 => 0x03CC, else => null }, // ο
+        0x03C5 => switch (mark) { // υ
+            0x0301 => 0x03CD, 0x0308 => 0x03CB, 0x0344 => 0x03B0,
+            else => null,
+        },
+        0x03C9 => switch (mark) { 0x0301 => 0x03CE, else => null }, // ω
+        // Cyrillic
+        0x0415 => switch (mark) { 0x0308 => 0x0401, else => null }, // Е
+        0x0435 => switch (mark) { 0x0308 => 0x0451, else => null }, // е
+        0x0418 => switch (mark) { // И
+            0x0300 => 0x040D, 0x0306 => 0x0419,
+            else => null,
+        },
+        0x0438 => switch (mark) { // и
+            0x0300 => 0x045D, 0x0306 => 0x0439,
+            else => null,
+        },
+        0x0423 => switch (mark) { 0x0306 => 0x040E, else => null }, // У
+        0x0443 => switch (mark) { 0x0306 => 0x045E, else => null }, // у
         else => null,
     };
 }
@@ -362,8 +433,54 @@ fn appendCodepoint(out: *std.ArrayList(u8), alloc: std.mem.Allocator, cp: u21) !
     try out.appendSlice(alloc, buf[0..n]);
 }
 
-/// NFD: decompose precomposed Latin codepoints into base + combining mark.
-/// Codepoints not in our partial table pass through unchanged.
+// Hangul Syllable Composition / Decomposition constants per Unicode Standard
+// Annex #15.
+const HANGUL_SBASE: u21 = 0xAC00;
+const HANGUL_LBASE: u21 = 0x1100;
+const HANGUL_VBASE: u21 = 0x1161;
+const HANGUL_TBASE: u21 = 0x11A7;
+const HANGUL_LCOUNT: u21 = 19;
+const HANGUL_VCOUNT: u21 = 21;
+const HANGUL_TCOUNT: u21 = 28;
+const HANGUL_NCOUNT: u21 = HANGUL_VCOUNT * HANGUL_TCOUNT; // 588
+const HANGUL_SCOUNT: u21 = HANGUL_LCOUNT * HANGUL_NCOUNT; // 11172
+
+/// If `cp` is a precomposed Hangul Syllable (U+AC00–U+D7A3), decompose
+/// it algorithmically into its Jamo components (L + V, and optionally T).
+/// Returns the number of components written (2 or 3) or 0 if not Hangul.
+fn decomposeHangul(cp: u21, out: *[3]u21) u8 {
+    if (cp < HANGUL_SBASE or cp >= HANGUL_SBASE + HANGUL_SCOUNT) return 0;
+    const s_idx = cp - HANGUL_SBASE;
+    const l_idx = s_idx / HANGUL_NCOUNT;
+    const v_idx = (s_idx % HANGUL_NCOUNT) / HANGUL_TCOUNT;
+    const t_idx = s_idx % HANGUL_TCOUNT;
+    out[0] = HANGUL_LBASE + l_idx;
+    out[1] = HANGUL_VBASE + v_idx;
+    if (t_idx != 0) {
+        out[2] = HANGUL_TBASE + t_idx;
+        return 3;
+    }
+    return 2;
+}
+
+/// Compose Hangul Jamo into a precomposed syllable. Returns null if the
+/// inputs don't form a valid composition pair/triple.
+fn composeHangulLV(l: u21, v: u21) ?u21 {
+    if (l < HANGUL_LBASE or l >= HANGUL_LBASE + HANGUL_LCOUNT) return null;
+    if (v < HANGUL_VBASE or v >= HANGUL_VBASE + HANGUL_VCOUNT) return null;
+    return HANGUL_SBASE + ((l - HANGUL_LBASE) * HANGUL_VCOUNT + (v - HANGUL_VBASE)) * HANGUL_TCOUNT;
+}
+
+fn composeHangulLVT(lv: u21, t: u21) ?u21 {
+    if (lv < HANGUL_SBASE or lv >= HANGUL_SBASE + HANGUL_SCOUNT) return null;
+    if ((lv - HANGUL_SBASE) % HANGUL_TCOUNT != 0) return null; // LV form
+    if (t <= HANGUL_TBASE or t >= HANGUL_TBASE + HANGUL_TCOUNT) return null;
+    return lv + (t - HANGUL_TBASE);
+}
+
+/// NFD: decompose precomposed Latin / Greek / Cyrillic codepoints into
+/// base + combining mark, and Hangul Syllables algorithmically into
+/// L + V (+ T) Jamo. Codepoints not in our table pass through.
 pub fn nfd(alloc: std.mem.Allocator, input: []const u8) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(alloc);
@@ -380,7 +497,13 @@ pub fn nfd(alloc: std.mem.Allocator, input: []const u8) ![]u8 {
             i += n;
             continue;
         };
-        if (decompose(cp)) |pair| {
+        // Hangul first (algorithmic; no table lookup).
+        var jamo: [3]u21 = undefined;
+        const j_count = decomposeHangul(cp, &jamo);
+        if (j_count > 0) {
+            var k: usize = 0;
+            while (k < j_count) : (k += 1) try appendCodepoint(&out, alloc, jamo[k]);
+        } else if (decompose(cp)) |pair| {
             try appendCodepoint(&out, alloc, pair[0]);
             try appendCodepoint(&out, alloc, pair[1]);
         } else {
@@ -391,9 +514,9 @@ pub fn nfd(alloc: std.mem.Allocator, input: []const u8) ![]u8 {
     return out.toOwnedSlice(alloc);
 }
 
-/// NFC: decompose then recompose. For codepoints we don't decompose,
-/// passthrough; for combining marks we don't have a composition for,
-/// leave as decomposed.
+/// NFC: decompose then recompose. Handles general (Latin/Greek/Cyrillic)
+/// table-based compositions AND Hangul L + V (+ T) algorithmic
+/// recomposition. Codepoints we don't compose stay as decomposed.
 pub fn nfc(alloc: std.mem.Allocator, input: []const u8) ![]u8 {
     const decomposed = try nfd(alloc, input);
     defer alloc.free(decomposed);
@@ -418,6 +541,24 @@ pub fn nfc(alloc: std.mem.Allocator, input: []const u8) ![]u8 {
             const n2 = std.unicode.utf8ByteSequenceLength(decomposed[i + n1]) catch 0;
             if (n2 > 0 and i + n1 + n2 <= decomposed.len) {
                 const cp2 = std.unicode.utf8Decode(decomposed[i + n1 ..][0..n2]) catch 0;
+                // Try Hangul LV composition first (algorithmic, faster).
+                if (composeHangulLV(cp1, @intCast(cp2))) |lv| {
+                    // After LV, try LVT (need a third codepoint).
+                    if (i + @as(usize, n1) + n2 < decomposed.len) {
+                        const n3 = std.unicode.utf8ByteSequenceLength(decomposed[i + n1 + n2]) catch 0;
+                        if (n3 > 0 and i + @as(usize, n1) + n2 + n3 <= decomposed.len) {
+                            const cp3 = std.unicode.utf8Decode(decomposed[i + n1 + n2 ..][0..n3]) catch 0;
+                            if (composeHangulLVT(lv, @intCast(cp3))) |lvt| {
+                                try appendCodepoint(&out, alloc, lvt);
+                                i += @as(usize, n1) + n2 + n3;
+                                continue;
+                            }
+                        }
+                    }
+                    try appendCodepoint(&out, alloc, lv);
+                    i += n1 + n2;
+                    continue;
+                }
                 if (compose(cp1, @intCast(cp2))) |composed| {
                     try appendCodepoint(&out, alloc, composed);
                     i += n1 + n2;
@@ -520,6 +661,58 @@ test "NFD passes non-Latin codepoints through" {
     const out = try nfd(testing.allocator, "日本語");
     defer testing.allocator.free(out);
     try testing.expectEqualStrings("日本語", out);
+}
+
+test "NFD decomposes Greek ά → α + acute" {
+    const out = try nfd(testing.allocator, "ά"); // U+03AC
+    defer testing.allocator.free(out);
+    // α (U+03B1, 0xCE 0xB1) + ́ (U+0301, 0xCC 0x81)
+    try testing.expectEqualSlices(u8, &[_]u8{ 0xCE, 0xB1, 0xCC, 0x81 }, out);
+}
+
+test "NFC composes Greek α + acute → ά" {
+    const input = [_]u8{ 0xCE, 0xB1, 0xCC, 0x81 };
+    const out = try nfc(testing.allocator, &input);
+    defer testing.allocator.free(out);
+    try testing.expectEqualSlices(u8, &[_]u8{ 0xCE, 0xAC }, out); // ά
+}
+
+test "NFD decomposes Cyrillic Ё → Е + dieresis" {
+    const out = try nfd(testing.allocator, "Ё"); // U+0401
+    defer testing.allocator.free(out);
+    // Е (U+0415, 0xD0 0x95) + ¨ (U+0308, 0xCC 0x88)
+    try testing.expectEqualSlices(u8, &[_]u8{ 0xD0, 0x95, 0xCC, 0x88 }, out);
+}
+
+test "NFD decomposes Hangul Syllable algorithmically (가 → ᄀ + ᅡ)" {
+    const out = try nfd(testing.allocator, "가"); // U+AC00
+    defer testing.allocator.free(out);
+    // ᄀ (U+1100, 0xE1 0x84 0x80) + ᅡ (U+1161, 0xE1 0x85 0xA1)
+    try testing.expectEqualSlices(u8, &[_]u8{ 0xE1, 0x84, 0x80, 0xE1, 0x85, 0xA1 }, out);
+}
+
+test "NFD decomposes Hangul Syllable with final consonant (각 → ᄀ + ᅡ + ᆨ)" {
+    const out = try nfd(testing.allocator, "각"); // U+AC01
+    defer testing.allocator.free(out);
+    // ᄀ + ᅡ + ᆨ (U+11A8, 0xE1 0x86 0xA8)
+    try testing.expectEqualSlices(u8, &[_]u8{ 0xE1, 0x84, 0x80, 0xE1, 0x85, 0xA1, 0xE1, 0x86, 0xA8 }, out);
+}
+
+test "NFC composes Hangul Jamo algorithmically (LVT)" {
+    // ᄀ + ᅡ + ᆨ → 각
+    const input = [_]u8{ 0xE1, 0x84, 0x80, 0xE1, 0x85, 0xA1, 0xE1, 0x86, 0xA8 };
+    const out = try nfc(testing.allocator, &input);
+    defer testing.allocator.free(out);
+    try testing.expectEqualSlices(u8, &[_]u8{ 0xEA, 0xB0, 0x81 }, out); // 각
+}
+
+test "Round-trip — Greek polytonic + Hangul mixed" {
+    const original = "Άθήνα 한국어 résumé";
+    const decomposed = try nfd(testing.allocator, original);
+    defer testing.allocator.free(decomposed);
+    const recomposed = try nfc(testing.allocator, decomposed);
+    defer testing.allocator.free(recomposed);
+    try testing.expectEqualStrings(original, recomposed);
 }
 
 test "NFKD aliases NFD for partial coverage" {

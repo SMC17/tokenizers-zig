@@ -1,5 +1,45 @@
 # Changelog
 
+## 0.12.0 — 2026-05-22
+
+Hangul Jamo algorithmic NFD/NFC + Greek monotonic + Cyrillic
+precomposed entries. Unicode normalization coverage expands from
+Latin-only to Latin + Greek + Cyrillic + Hangul. 161 tests pass.
+
+### Hangul (algorithmic)
+
+- `decomposeHangul(cp, out)` splits a precomposed Hangul Syllable
+  (U+AC00–U+D7A3) into L (Choseong) + V (Jungseong) + optional T
+  (Jongseong) Jamo per Unicode Standard Annex #15.
+- `composeHangulLV(l, v)` and `composeHangulLVT(lv, t)` perform the
+  inverse — no table required.
+- Verified: `한국어 가 각` round-trips byte-identical through NFD → NFC.
+
+### Greek monotonic
+
+- ~20 new decompose+compose entries covering precomposed vowels with
+  acute / dieresis / dieresis-tonos. Ά Έ Ή Ί Ό Ύ Ώ ά έ ή ί ό ύ ώ ϊ ϋ Ϊ Ϋ
+  ΐ ΰ all round-trip.
+
+### Cyrillic
+
+- Ё ё Ѝ ѝ Ў ў Й й decompose to base + dieresis/breve and recompose
+  symmetrically.
+
+### Verified round-trips
+
+- "Άθήνα 한국어 résumé" decomposes through partial NFD and reassembles
+  identical via NFC.
+
+### Bug fix
+
+- Fixed `u3 + u3 + u3` overflow when summing byte-sequence lengths in
+  the NFC Hangul LVT branch (now widens to usize before adding).
+
+### Test count
+
+161 tests pass.
+
 ## 0.11.0 — 2026-05-22
 
 Batch decode + parallel decode + Rust-side benches for WordPiece +
