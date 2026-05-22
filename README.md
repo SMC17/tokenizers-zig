@@ -7,8 +7,9 @@ Portfolio artifact #4b in the broader sovereign-stack portfolio.
 
 ## Status
 
-**v0.13 — full pipeline, all three model families, batch-with-types
-APIs, expanded Unicode normalization. 163 tests pass.**
+**v0.14 — full pipeline, all three model families, 6-subcommand
+tokenize CLI, batch-with-types APIs, expanded Unicode normalization.
+163 tests pass.**
 
 ### Head-to-head vs HuggingFace Rust tokenizers
 
@@ -129,9 +130,20 @@ Same code works against BPE, WordPiece, or Unigram tokenizer.json —
 
 ```sh
 zig build test                              # 163 unit + integration tests
-zig build tokenize -- f.json "<text>"       # encode + decode CLI
+zig build tokenize                          # build tokenize CLI (6 subcommands)
 zig build bench                             # synthetic encode throughput
 zig build bench-real-tinyllama              # real Llama tokenizer encode bench
+```
+
+## CLI (`tokenize`)
+
+```sh
+tokenize encode      <tokenizer.json> "<text>"        # full pipeline encode
+tokenize encode-base <tokenizer.json> "<text>"        # raw model output (no template)
+tokenize encode-pair <tokenizer.json> "<a>" "<b>"     # BERT NSP-style pair
+tokenize encode-full <tokenizer.json> "<text>"        # ids + type_ids + mask
+tokenize decode      <tokenizer.json> "<ids,csv>"     # decode IDs → text
+tokenize info        <tokenizer.json>                 # model / vocab / config
 ```
 
 ## Position in the portfolio

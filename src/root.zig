@@ -103,6 +103,30 @@ pub const EncodeResult = struct {
     }
 };
 
+/// Token byte-offset range in the original input text. `start` is the
+/// byte index where the source chunk begins; `end` is exclusive.
+/// Tokens emitted from the same WordPiece "word" share the chunk's
+/// range. Tokens from the added-token scan get the exact match range.
+/// For pipelines that don't whitespace-split (e.g. raw ByteLevel BPE),
+/// every token gets `(0, text.len)`.
+pub const TokenOffset = struct {
+    start: u32,
+    end: u32,
+};
+
+/// Encoded output with per-token byte offsets in the original input.
+/// Useful for NER and other tasks that need to map tokens back to
+/// source text positions.
+pub const EncodeWithOffsetsResult = struct {
+    ids: []u32,
+    offsets: []TokenOffset,
+
+    pub fn deinit(self: EncodeWithOffsetsResult, alloc: std.mem.Allocator) void {
+        alloc.free(self.ids);
+        alloc.free(self.offsets);
+    }
+};
+
 /// Truncation strategy applied after encode + TemplateProcessing.
 pub const TruncationDirection = enum { right, left };
 
@@ -227,6 +251,100 @@ pub const Tokenizer = struct {
         const base = try self.encodeBase(alloc, text);
         defer alloc.free(base);
         return self.applyPostProcessing(alloc, base);
+    }
+
+    /// Encode WITH per-token byte offsets. Each token's offset is the
+    /// byte range of the *chunk* it came from (whitespace + punctuation
+    /// split word for WordPiece pipelines, full text for non-split
+    /// pipelines). Caller frees via `EncodeWithOffsetsResult.deinit`.
+    pub fn encodeWithOffsets(self: *Tokenizer, alloc: std.mem.Allocator, text: []const u8) !EncodeWithOffsetsResult {
+        var ids_out: std.ArrayList(u32) = .empty;
+        errdefer ids_out.deinit(alloc);
+        var off_out: std.ArrayList(TokenOffset) = .empty;
+        errdefer off_out.deinit(alloc);
+
+        if (self.added_tokens.len > 0) {
+            var pos: usize = 0;
+            var chunk_start: usize = 0;
+            while (pos < text.len) {
+                if (self.matchAddedToken(text, pos)) |at| {
+                    if (pos > chunk_start) {
+                        try self.encodeChunkWithOffsets(alloc, text, chunk_start, pos, &ids_out, &off_out);
+                    }
+                    try ids_out.append(alloc, at.id);
+                    try off_out.append(alloc, .{ .start = @intCast(pos), .end = @intCast(pos + at.content.len) });
+                    pos += at.content.len;
+                    chunk_start = pos;
+                } else {
+                    pos += 1;
+                }
+            }
+            if (chunk_start < text.len) {
+                try self.encodeChunkWithOffsets(alloc, text, chunk_start, text.len, &ids_out, &off_out);
+            }
+        } else {
+            try self.encodeChunkWithOffsets(alloc, text, 0, text.len, &ids_out, &off_out);
+        }
+
+        return .{
+            .ids = try ids_out.toOwnedSlice(alloc),
+            .offsets = try off_out.toOwnedSlice(alloc),
+        };
+    }
+
+    /// Encode a chunk of `text[start..end]` and append ids + offsets.
+    /// For wordpiece + whitespace_split, each whitespace-separated word
+    /// gets its own offset range; tokens within a word share that range.
+    /// For other pipelines, every emitted token gets `(start, end)`.
+    fn encodeChunkWithOffsets(
+        self: *Tokenizer,
+        alloc: std.mem.Allocator,
+        text: []const u8,
+        start: usize,
+        end: usize,
+        ids_out: *std.ArrayList(u32),
+        off_out: *std.ArrayList(TokenOffset),
+    ) !void {
+        const chunk_text = text[start..end];
+        if (self.model == .wordpiece and self.use_whitespace_split) {
+            // Word-level offset tracking: walk the chunk byte-by-byte,
+            // splitting on whitespace; for each non-empty word emit
+            // ids tagged with its byte range in `text`.
+            var i: usize = 0;
+            while (i < chunk_text.len) {
+                while (i < chunk_text.len and isWhitespaceByte(chunk_text[i])) i += 1;
+                const word_start = i;
+                while (i < chunk_text.len and !isWhitespaceByte(chunk_text[i])) i += 1;
+                const word_end = i;
+                if (word_end > word_start) {
+                    const word = chunk_text[word_start..word_end];
+                    const abs_start: u32 = @intCast(start + word_start);
+                    const abs_end: u32 = @intCast(start + word_end);
+                    const before = ids_out.items.len;
+                    if (self.split_on_punctuation) {
+                        try encodePunctSplit(alloc, &self.model.wordpiece, ids_out, word);
+                    } else {
+                        const word_ids = try self.model.wordpiece.encode(alloc, word);
+                        defer alloc.free(word_ids);
+                        try ids_out.appendSlice(alloc, word_ids);
+                    }
+                    const added = ids_out.items.len - before;
+                    try off_out.appendNTimes(alloc, .{ .start = abs_start, .end = abs_end }, added);
+                }
+            }
+            return;
+        }
+
+        // Other pipelines: tag every token with the whole-chunk range.
+        const before = ids_out.items.len;
+        const chunk_ids = try self.encodeChunk(alloc, chunk_text);
+        defer alloc.free(chunk_ids);
+        try ids_out.appendSlice(alloc, chunk_ids);
+        const added = ids_out.items.len - before;
+        try off_out.appendNTimes(alloc, .{
+            .start = @intCast(start),
+            .end = @intCast(end),
+        }, added);
     }
 
     /// Encode WITHOUT TemplateProcessing / truncation / padding. Returns
@@ -1345,6 +1463,10 @@ fn parsePreTokenizer(
         }
     }
     // Unknown pre-tokenizer types are silently skipped (degrade gracefully).
+}
+
+fn isWhitespaceByte(b: u8) bool {
+    return b == ' ' or b == '\t' or b == '\n' or b == '\r' or b == 0x0B or b == 0x0C;
 }
 
 /// Apply truncation + padding to ids + type_ids + attention_mask
