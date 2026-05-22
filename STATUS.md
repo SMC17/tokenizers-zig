@@ -1,7 +1,15 @@
 # STATUS
 
-**Version:** v0.12
+**Version:** v0.13
 **Last update:** 2026-05-22
+
+## What landed in v0.13 (on top of v0.12)
+
+- **`encodeBatchWithTypes(texts)`** and **`encodeBatchPairWithTypes(a, b)`**
+  return `[]EncodeResult` with ids + type_ids + attention_mask per row.
+- `freeBatchWithTypes` helper.
+
+163 tests pass.
 
 ## What landed in v0.12 (on top of v0.11)
 
