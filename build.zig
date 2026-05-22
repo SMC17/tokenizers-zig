@@ -28,6 +28,32 @@ pub fn build(b: *std.Build) void {
     const real_step = b.step("test-real-tinyllama", "Real TinyLlama tokenizer test");
     real_step.dependOn(&run_real.step);
 
+    // Real bert-base-uncased tokenizer integration test
+    const bert_mod = b.createModule(.{
+        .root_source_file = b.path("tests/test_real_bert.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    bert_mod.addImport("tokenizers", mod);
+    const bert_tests = b.addTest(.{ .root_module = bert_mod });
+    const run_bert = b.addRunArtifact(bert_tests);
+    test_step.dependOn(&run_bert.step);
+    const bert_step = b.step("test-real-bert", "Real BERT-base-uncased tokenizer test");
+    bert_step.dependOn(&run_bert.step);
+
+    // Real t5-base tokenizer integration test
+    const t5_mod = b.createModule(.{
+        .root_source_file = b.path("tests/test_real_t5.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    t5_mod.addImport("tokenizers", mod);
+    const t5_tests = b.addTest(.{ .root_module = t5_mod });
+    const run_t5 = b.addRunArtifact(t5_tests);
+    test_step.dependOn(&run_t5.step);
+    const t5_step = b.step("test-real-t5", "Real T5-base tokenizer test");
+    t5_step.dependOn(&run_t5.step);
+
     // Demo CLI: tokenize <tokenizer.json> "<text>"
     const tok_mod = b.createModule(.{
         .root_source_file = b.path("examples/tokenize.zig"),
