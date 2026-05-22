@@ -339,6 +339,54 @@ pub const Tokenizer = struct {
             return;
         }
 
+        // Unigram + WhitespaceSplit + Metaspace (T5 pattern): split
+        // chunk on whitespace into words; per word, prepend metaspace
+        // and Viterbi-encode with offsets; map offsets back to original
+        // chunk byte positions by subtracting the metaspace prefix length.
+        if (self.model == .unigram and self.use_whitespace_split and self.metaspace_replacement != null) {
+            const rep = self.metaspace_replacement.?;
+            const normalized = try normalizer.apply(alloc, self.normalizer, chunk_text);
+            defer alloc.free(normalized);
+            // Walk whitespace-separated words in `normalized`. Track each
+            // word's byte range within `normalized` so we can shift to
+            // absolute positions in the original `text`.
+            // NOTE: we assume normalize is byte-identical to the original
+            // chunk for ASCII inputs (which is true for T5's Precompiled
+            // normalizer degrading to none). For Latin normalize, ranges
+            // map approximately to original positions.
+            var piece_buf: std.ArrayList(u8) = .empty;
+            defer piece_buf.deinit(alloc);
+            var p: usize = 0;
+            while (p < normalized.len) {
+                while (p < normalized.len and isWhitespaceByte(normalized[p])) p += 1;
+                const word_start_n = p;
+                while (p < normalized.len and !isWhitespaceByte(normalized[p])) p += 1;
+                const word_end_n = p;
+                if (word_end_n > word_start_n) {
+                    const word = normalized[word_start_n..word_end_n];
+                    piece_buf.clearRetainingCapacity();
+                    try piece_buf.appendSlice(alloc, rep);
+                    try piece_buf.appendSlice(alloc, word);
+                    const r = try self.model.unigram.encodeWithOffsets(alloc, piece_buf.items);
+                    defer alloc.free(r.ids);
+                    defer alloc.free(r.offsets);
+                    const abs_word_start: u32 = @intCast(start + word_start_n);
+                    const word_len: u32 = @intCast(word.len);
+                    for (r.ids, r.offsets) |id, off| {
+                        const rep_len: u32 = @intCast(rep.len);
+                        const in_start: u32 = if (off[0] > rep_len) off[0] - rep_len else 0;
+                        const in_end: u32 = if (off[1] > rep_len) @min(off[1] - rep_len, word_len) else 0;
+                        try ids_out.append(alloc, id);
+                        try off_out.append(alloc, .{
+                            .start = abs_word_start + in_start,
+                            .end = abs_word_start + in_end,
+                        });
+                    }
+                }
+            }
+            return;
+        }
+
         // BPE + ByteLevel pipeline: track sub-token offsets through
         // ByteLevel encode → BPE merge. Each token's byte range maps
         // back to the original input via the ByteLevel input_index table.
@@ -2551,6 +2599,31 @@ test "encodeBatchParallel — produces same output as encodeBatch (4 threads)" {
 
     try testing.expectEqual(seq.len, par.len);
     for (seq, par) |s, p| try testing.expectEqualSlices(u32, s, p);
+}
+
+test "encodeWithOffsets — Unigram+Metaspace sub-token offsets" {
+    const json =
+        \\{
+        \\  "version": "1.0",
+        \\  "pre_tokenizer": {"type": "Sequence", "pretokenizers": [{"type": "WhitespaceSplit"}, {"type": "Metaspace"}]},
+        \\  "model": {
+        \\    "type": "Unigram",
+        \\    "vocab": [["<unk>", 0.0], ["▁hello", -1.0], ["▁world", -1.0]],
+        \\    "unk_id": 0
+        \\  }
+        \\}
+    ;
+    var tok = try fromJson(testing.allocator, json);
+    defer tok.deinit();
+
+    const r = try tok.encodeWithOffsets(testing.allocator, "hello world");
+    defer r.deinit(testing.allocator);
+    try testing.expectEqualSlices(u32, &[_]u32{ 1, 2 }, r.ids);
+    // ▁hello at word-relative byte [0,5]; ▁world at byte [6,11].
+    try testing.expectEqual(@as(u32, 0), r.offsets[0].start);
+    try testing.expectEqual(@as(u32, 5), r.offsets[0].end);
+    try testing.expectEqual(@as(u32, 6), r.offsets[1].start);
+    try testing.expectEqual(@as(u32, 11), r.offsets[1].end);
 }
 
 test "encodeWithOffsets — BPE+ByteLevel sub-token offsets" {

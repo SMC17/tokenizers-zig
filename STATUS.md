@@ -1,7 +1,20 @@
 # STATUS
 
-**Version:** v0.17
+**Version:** v0.18
 **Last update:** 2026-05-22
+
+## What landed in v0.18 (on top of v0.17)
+
+- **`unigram.encodeWithOffsets`** — Viterbi returns ids + per-segment
+  byte ranges.
+- **`Tokenizer.encodeWithOffsets` Unigram+Metaspace path** — true
+  sub-token byte ranges through whitespace-split → metaspace-prepend →
+  Viterbi → metaspace-prefix-subtract pipeline.
+- **All three families now produce sub-token offsets** (WordPiece v0.16,
+  BPE+ByteLevel v0.17, Unigram+Metaspace v0.18). BPE+SP marker (Llama)
+  remains chunk-level — v0.19 work.
+
+176 tests pass.
 
 ## What landed in v0.17 (on top of v0.16)
 
