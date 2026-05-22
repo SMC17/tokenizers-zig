@@ -44,6 +44,95 @@ pub const Model = struct {
         self.allocator.destroy(self.arena);
     }
 
+    /// Encode and return parallel byte-offset ranges (in the input
+    /// word's byte space) for each emitted token. Useful for NER sub-
+    /// word offset tracking. Caller frees both slices.
+    pub fn encodeWithOffsets(
+        self: *const Model,
+        alloc: std.mem.Allocator,
+        word: []const u8,
+    ) !struct { ids: []u32, offsets: [][2]u32 } {
+        if (word.len == 0) return .{
+            .ids = try alloc.alloc(u32, 0),
+            .offsets = try alloc.alloc([2]u32, 0),
+        };
+
+        var boundaries: std.ArrayList(usize) = .empty;
+        defer boundaries.deinit(alloc);
+        try boundaries.append(alloc, 0);
+        var i: usize = 0;
+        while (i < word.len) {
+            const n = try std.unicode.utf8ByteSequenceLength(word[i]);
+            if (i + n > word.len) return Error.InvalidUtf8;
+            i += n;
+            try boundaries.append(alloc, i);
+        }
+        const n_chars: u32 = @intCast(boundaries.items.len - 1);
+
+        if (n_chars > self.max_input_chars_per_word) {
+            const ids = try alloc.alloc(u32, 1);
+            ids[0] = self.unk_id;
+            const offs = try alloc.alloc([2]u32, 1);
+            offs[0] = .{ 0, @intCast(word.len) };
+            return .{ .ids = ids, .offsets = offs };
+        }
+
+        var ids_out: std.ArrayList(u32) = .empty;
+        errdefer ids_out.deinit(alloc);
+        var off_out: std.ArrayList([2]u32) = .empty;
+        errdefer off_out.deinit(alloc);
+
+        var key_buf: std.ArrayList(u8) = .empty;
+        defer key_buf.deinit(alloc);
+
+        var start: u32 = 0;
+        while (start < n_chars) {
+            var end: u32 = n_chars;
+            var matched_id: ?u32 = null;
+            var matched_end: u32 = 0;
+            while (end > start) : (end -= 1) {
+                const byte_start = boundaries.items[start];
+                const byte_end = boundaries.items[end];
+                const substr = word[byte_start..byte_end];
+                const lookup: []const u8 = if (start == 0)
+                    substr
+                else blk: {
+                    key_buf.clearRetainingCapacity();
+                    try key_buf.appendSlice(alloc, self.continuing_subword_prefix);
+                    try key_buf.appendSlice(alloc, substr);
+                    break :blk key_buf.items;
+                };
+                if (self.vocab.get(lookup)) |id| {
+                    matched_id = id;
+                    matched_end = end;
+                    break;
+                }
+            }
+            if (matched_id) |id| {
+                try ids_out.append(alloc, id);
+                try off_out.append(alloc, .{
+                    @intCast(boundaries.items[start]),
+                    @intCast(boundaries.items[matched_end]),
+                });
+                start = matched_end;
+            } else {
+                ids_out.clearRetainingCapacity();
+                off_out.clearRetainingCapacity();
+                try ids_out.append(alloc, self.unk_id);
+                try off_out.append(alloc, .{ 0, @intCast(word.len) });
+                return .{
+                    .ids = try ids_out.toOwnedSlice(alloc),
+                    .offsets = try off_out.toOwnedSlice(alloc),
+                };
+            }
+        }
+
+        return .{
+            .ids = try ids_out.toOwnedSlice(alloc),
+            .offsets = try off_out.toOwnedSlice(alloc),
+        };
+    }
+
     /// Encode a single pre-tokenized "word" (already split on whitespace +
     /// punctuation by the caller) into token IDs. Caller frees.
     pub fn encode(self: *const Model, alloc: std.mem.Allocator, word: []const u8) ![]u32 {
@@ -374,6 +463,35 @@ test "WordPiece — decode adds space between root tokens" {
     const text = try m.decode(testing.allocator, &[_]u32{ 1, 2 });
     defer testing.allocator.free(text);
     try testing.expectEqualStrings("hello world", text);
+}
+
+test "WordPiece encodeWithOffsets — sub-word ranges within a single word" {
+    var m = try build(
+        testing.allocator,
+        &.{
+            .{ .token = "[UNK]", .id = 0 },
+            .{ .token = "un", .id = 1 },
+            .{ .token = "##aff", .id = 2 },
+            .{ .token = "##able", .id = 3 },
+        },
+        0,
+        "##",
+        100,
+    );
+    defer m.deinit();
+
+    const r = try m.encodeWithOffsets(testing.allocator, "unaffable");
+    defer testing.allocator.free(r.ids);
+    defer testing.allocator.free(r.offsets);
+
+    try testing.expectEqualSlices(u32, &[_]u32{ 1, 2, 3 }, r.ids);
+    // un=[0,2], ##aff=[2,5], ##able=[5,9]
+    try testing.expectEqual(@as(u32, 0), r.offsets[0][0]);
+    try testing.expectEqual(@as(u32, 2), r.offsets[0][1]);
+    try testing.expectEqual(@as(u32, 2), r.offsets[1][0]);
+    try testing.expectEqual(@as(u32, 5), r.offsets[1][1]);
+    try testing.expectEqual(@as(u32, 5), r.offsets[2][0]);
+    try testing.expectEqual(@as(u32, 9), r.offsets[2][1]);
 }
 
 test "WordPiece — encode + decode round-trip on split word" {

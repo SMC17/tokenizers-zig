@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.16.0 — 2026-05-22
+
+True sub-word token offsets for WordPiece. NER-grade precision.
+167 tests pass.
+
+### Sub-word offsets
+
+- New `wordpiece.Model.encodeWithOffsets(word)` returns parallel
+  `ids` + `[][2]u32 offsets` where each offset is the byte range of
+  that sub-word piece within the input word.
+- `Tokenizer.encodeWithOffsets(text)` upgraded to use sub-word
+  granularity for WordPiece+whitespace_split pipelines:
+  - Each WordPiece sub-token gets its true byte range
+  - `unaffable` → `un=[0,2]`, `##aff=[2,5]`, `##able=[5,9]`
+- Punctuation-split words preserve per-piece offsets:
+  - `hello, world!` → `hello=[0,5]`, `,=[5,6]`, `world=[7,12]`, `!=[12,13]`
+
+### Test count
+
+167 tests pass.
+
 ## 0.15.0 — 2026-05-22
 
 Token byte-offsets for WordPiece (BERT NER use case). 165 tests pass.
