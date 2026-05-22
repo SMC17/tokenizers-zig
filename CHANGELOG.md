@@ -1,5 +1,50 @@
 # Changelog
 
+## 0.11.0 — 2026-05-22
+
+Batch decode + parallel decode + Rust-side benches for WordPiece +
+Unigram. Honest head-to-head numbers for all three model families.
+147 tests pass.
+
+### Batch decode
+
+- `decodeBatch(batches: []const []const u32) → [][]u8` — sequential
+  per-row decode.
+- `decodeBatchParallel(batches, n_threads) → [][]u8` — std.Thread fan-out
+  mirroring `encodeBatchParallel`.
+- `freeDecodeBatch` releases inner + outer slices.
+
+### Rust-side benches (BERT WordPiece + T5 Unigram)
+
+New Cargo projects `bench/bench_rust_bert/` and `bench/bench_rust_t5/`
+running `huggingface/tokenizers` 0.21 on the same fixtures + texts as
+the Zig benches. Both pass `add_special_tokens=true` for parity with
+our TemplateProcessing-wrapped output. Run via:
+
+```
+cd bench/bench_rust_bert && cargo run --release
+cd bench/bench_rust_t5 && cargo run --release
+```
+
+Honest head-to-head, same hardware (consumer Linux, ReleaseFast):
+
+| Family | Zig | Rust HF 0.21 | Ratio |
+|---|---|---|---|
+| BPE+SentencePiece (TinyLlama) | ~45 μs | ~46 μs | ~1.0x (parity) |
+| **WordPiece (BERT-base-uncased)** | **~15 μs** | **~82 μs** | **~5.3x Zig faster** |
+| Unigram (T5-base) | ~38 μs | ~44 μs | ~1.16x Zig faster |
+
+Same 123-byte test text. Same canonical token counts after
+TemplateProcessing wrap (29 for BERT, 34 for both T5 and TinyLlama).
+
+The BERT result is the headline: pure-Zig greedy-longest-match with
+codepoint-aware boundaries + first-byte added-token index outpaces
+HF Rust's WordPiece by ~5x on consumer hardware.
+
+### Test count
+
+147 tests pass.
+
 ## 0.10.0 — 2026-05-22
 
 Attention mask return. Completes the canonical HF EncodeResult surface

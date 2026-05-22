@@ -1,7 +1,26 @@
 # STATUS
 
-**Version:** v0.10
+**Version:** v0.11
 **Last update:** 2026-05-22
+
+## What landed in v0.11 (on top of v0.10)
+
+- **`decodeBatch` + `decodeBatchParallel`** — sequential + parallel
+  batch decode, mirrors encode-side. 147 tests pass.
+- **Rust-side benches for BERT + T5** — new Cargo projects exercise
+  `huggingface/tokenizers` 0.21 on the same fixtures.
+
+Head-to-head across all three families:
+
+| Family | Zig | Rust HF 0.21 | Ratio |
+|---|---|---|---|
+| BPE+SP (TinyLlama) | ~45μs | ~46μs | ~1.0x |
+| **WordPiece (BERT)** | **~15μs** | **~82μs** | **~5.3x Zig faster** |
+| Unigram (T5) | ~38μs | ~44μs | ~1.16x Zig faster |
+
+WordPiece 5.3x ratio is the headline. Pure-Zig greedy-longest-match
+with codepoint-aware boundaries + first-byte added-token index
+outpaces HF Rust's WordPiece by ~5x on consumer hardware.
 
 ## What landed in v0.10 (on top of v0.9)
 

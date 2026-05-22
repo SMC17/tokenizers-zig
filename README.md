@@ -7,6 +7,20 @@ families. Portfolio artifact #4b of the 8-artifact jaw-drop portfolio.
 
 ## Status
 
+**v0.11 — honest head-to-head against HuggingFace Rust tokenizers
+across all three model families. 147 tests pass.**
+
+| Family | Zig | Rust HF 0.21 | Ratio |
+|---|---|---|---|
+| BPE+SP (TinyLlama) | ~45 μs | ~46 μs | ~1.0x (parity) |
+| **WordPiece (BERT-base-uncased)** | **~15 μs** | **~82 μs** | **~5.3x Zig faster** |
+| Unigram (T5-base) | ~38 μs | ~44 μs | ~1.16x Zig faster |
+
+Same 123-byte fixture, same canonical 29-token output (BERT), same
+hardware. The WordPiece 5.3x ratio is pure-Zig greedy-longest-match
+beating HF Rust on consumer Linux. Bench harnesses at
+`bench/bench_rust_bert/` and `bench/bench_rust_t5/`.
+
 **v0.4 — full pipeline: TemplateProcessing wrap, ByteFallback decode,
 Truncation/Padding, Unicode punctuation, partial NFC/NFD/NFKC/NFKD,
 partial GPT-2 word-boundary regex pre-tokenize. 127 tests pass.**
