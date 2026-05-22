@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.13.0 — 2026-05-22
+
+Batch-with-types APIs for consistency with the EncodeResult surface.
+163 tests pass.
+
+### Batch-with-types
+
+- `encodeBatchWithTypes(texts) → []EncodeResult` — sequential batch
+  encode returning ids + type_ids + attention_mask per text.
+- `encodeBatchPairWithTypes(pairs_a, pairs_b) → []EncodeResult` — pair
+  batch (BERT NSP scale-out).
+- `freeBatchWithTypes(batch)` releases each EncodeResult and the
+  outer slice.
+
+### Test count
+
+163 tests pass.
+
 ## 0.12.0 — 2026-05-22
 
 Hangul Jamo algorithmic NFD/NFC + Greek monotonic + Cyrillic

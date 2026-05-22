@@ -278,6 +278,46 @@ pub const Tokenizer = struct {
         return out;
     }
 
+    /// Batch encode returning `EncodeResult` per text — includes
+    /// `ids`, `type_ids`, and `attention_mask`. Caller frees via
+    /// `freeBatchWithTypes`.
+    pub fn encodeBatchWithTypes(self: *Tokenizer, alloc: std.mem.Allocator, texts: []const []const u8) ![]EncodeResult {
+        const out = try alloc.alloc(EncodeResult, texts.len);
+        errdefer alloc.free(out);
+        var done: usize = 0;
+        errdefer for (out[0..done]) |r| r.deinit(alloc);
+        for (texts, 0..) |t, i| {
+            out[i] = try self.encodeWithTypes(alloc, t);
+            done = i + 1;
+        }
+        return out;
+    }
+
+    /// Free a slice of EncodeResults.
+    pub fn freeBatchWithTypes(alloc: std.mem.Allocator, batch: []EncodeResult) void {
+        for (batch) |r| r.deinit(alloc);
+        alloc.free(batch);
+    }
+
+    /// Batch sentence-pair encode returning `EncodeResult` per pair.
+    pub fn encodeBatchPairWithTypes(
+        self: *Tokenizer,
+        alloc: std.mem.Allocator,
+        pairs_a: []const []const u8,
+        pairs_b: []const []const u8,
+    ) ![]EncodeResult {
+        if (pairs_a.len != pairs_b.len) return error.MismatchedBatchSize;
+        const out = try alloc.alloc(EncodeResult, pairs_a.len);
+        errdefer alloc.free(out);
+        var done: usize = 0;
+        errdefer for (out[0..done]) |r| r.deinit(alloc);
+        for (pairs_a, pairs_b, 0..) |a, b, i| {
+            out[i] = try self.encodePairWithTypes(alloc, a, b);
+            done = i + 1;
+        }
+        return out;
+    }
+
     /// Like `encodeBatch` but parallelised across `n_threads`. Each
     /// worker thread takes a contiguous chunk of inputs and encodes
     /// them with its own per-thread allocator (an `ArenaAllocator`
@@ -2297,6 +2337,69 @@ test "encodeBatchParallel — produces same output as encodeBatch (4 threads)" {
 
     try testing.expectEqual(seq.len, par.len);
     for (seq, par) |s, p| try testing.expectEqualSlices(u32, s, p);
+}
+
+test "encodeBatchWithTypes — returns parallel EncodeResults" {
+    const json =
+        \\{
+        \\  "version": "1.0",
+        \\  "pre_tokenizer": {"type": "ByteLevel"},
+        \\  "model": {"type": "BPE", "vocab": {"a": 0, "b": 1, "c": 2}, "merges": []}
+        \\}
+    ;
+    var tok = try fromJson(testing.allocator, json);
+    defer tok.deinit();
+
+    const texts = [_][]const u8{ "ab", "abc" };
+    const batch = try tok.encodeBatchWithTypes(testing.allocator, &texts);
+    defer Tokenizer.freeBatchWithTypes(testing.allocator, batch);
+
+    try testing.expectEqualSlices(u32, &[_]u32{ 0, 1 }, batch[0].ids);
+    try testing.expectEqualSlices(u8, &[_]u8{ 0, 0 }, batch[0].type_ids);
+    try testing.expectEqualSlices(u8, &[_]u8{ 1, 1 }, batch[0].attention_mask);
+    try testing.expectEqualSlices(u32, &[_]u32{ 0, 1, 2 }, batch[1].ids);
+    try testing.expectEqualSlices(u8, &[_]u8{ 1, 1, 1 }, batch[1].attention_mask);
+}
+
+test "encodeBatchPairWithTypes — preserves type_ids across pair batch" {
+    const json =
+        \\{
+        \\  "version": "1.0",
+        \\  "added_tokens": [
+        \\    {"id": 101, "content": "[CLS]"},
+        \\    {"id": 102, "content": "[SEP]"}
+        \\  ],
+        \\  "pre_tokenizer": {"type": "ByteLevel"},
+        \\  "post_processor": {
+        \\    "type": "TemplateProcessing",
+        \\    "pair": [
+        \\      {"SpecialToken": {"id": "[CLS]", "type_id": 0}},
+        \\      {"Sequence": {"id": "A", "type_id": 0}},
+        \\      {"SpecialToken": {"id": "[SEP]", "type_id": 0}},
+        \\      {"Sequence": {"id": "B", "type_id": 1}},
+        \\      {"SpecialToken": {"id": "[SEP]", "type_id": 1}}
+        \\    ],
+        \\    "special_tokens": {
+        \\      "[CLS]": {"id": "[CLS]", "ids": [101], "tokens": ["[CLS]"]},
+        \\      "[SEP]": {"id": "[SEP]", "ids": [102], "tokens": ["[SEP]"]}
+        \\    }
+        \\  },
+        \\  "model": {"type": "BPE", "vocab": {"a": 0, "b": 1, "c": 2}, "merges": []}
+        \\}
+    ;
+    var tok = try fromJson(testing.allocator, json);
+    defer tok.deinit();
+
+    const a = [_][]const u8{ "a", "ab" };
+    const b = [_][]const u8{ "b", "c" };
+    const batch = try tok.encodeBatchPairWithTypes(testing.allocator, &a, &b);
+    defer Tokenizer.freeBatchWithTypes(testing.allocator, batch);
+
+    try testing.expectEqual(@as(usize, 2), batch.len);
+    try testing.expectEqualSlices(u32, &[_]u32{ 101, 0, 102, 1, 102 }, batch[0].ids);
+    try testing.expectEqualSlices(u8, &[_]u8{ 0, 0, 0, 1, 1 }, batch[0].type_ids);
+    try testing.expectEqualSlices(u32, &[_]u32{ 101, 0, 1, 102, 2, 102 }, batch[1].ids);
+    try testing.expectEqualSlices(u8, &[_]u8{ 0, 0, 0, 0, 1, 1 }, batch[1].type_ids);
 }
 
 test "decodeBatch — round-trips encodeBatch output" {
