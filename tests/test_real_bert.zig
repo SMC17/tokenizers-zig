@@ -162,6 +162,23 @@ test "real BERT-base-uncased — encodePair wraps with [CLS] A [SEP] B [SEP]" {
     try std.testing.expectEqualSlices(u32, &[_]u32{ 101, 7592, 102, 2088, 102 }, ids);
 }
 
+test "real BERT-base-uncased — encodePairWithTypes produces canonical type_ids" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    try skipIfMissing(io);
+
+    var tok = try loadTokenizer(alloc, io);
+    defer tok.deinit();
+
+    const result = try tok.encodePairWithTypes(alloc, "hello", "world");
+    defer result.deinit(alloc);
+
+    try std.testing.expectEqualSlices(u32, &[_]u32{ 101, 7592, 102, 2088, 102 }, result.ids);
+    // BERT segment ids: A=0 for first three (CLS, hello, SEP), B=1 for
+    // last two (world, SEP). Matches HF tokenizer output exactly.
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0, 0, 0, 1, 1 }, result.type_ids);
+}
+
 test "real BERT-base-uncased — encode + decode round-trip emits wrapped text" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;

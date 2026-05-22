@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.9.0 — 2026-05-22
+
+Token type IDs (BERT segment markers) return. 143 tests pass.
+
+### type_ids API
+
+- New `EncodeResult` struct returns `ids` + `type_ids` as parallel
+  arrays. `type_ids[i]` is the BERT-style segment marker (0 = A, 1 = B
+  by convention) for `ids[i]`.
+- `encodeWithTypes(text)` — single-sequence variant; type_ids are all
+  zero by default for tokenizers with no template.
+- `encodePairWithTypes(a, b)` — pair variant; type_ids follow the
+  `type_id` field on each `TemplateOp` (templates without type_id
+  default to 0 for A and 1 for B).
+- `TemplateOp` refactored from a bare union to a `{kind, type_id}`
+  struct. Parser reads `type_id` from each template entry.
+- Truncation + padding apply symmetrically to both arrays (padding
+  type_ids are 0).
+- **Real BERT canonical**: `encodePairWithTypes("hello", "world")` →
+  `ids=[101, 7592, 102, 2088, 102]`, `type_ids=[0, 0, 0, 1, 1]`.
+  Matches HF tokenizer output exactly.
+
+### Test count
+
+143 tests pass.
+
 ## 0.8.0 — 2026-05-22
 
 Parallel batch encode + scaling bench. 140 tests pass.
