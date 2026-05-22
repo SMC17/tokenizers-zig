@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.24.0 — 2026-05-22
+
+`bench-offsets-bert` — sub-token offset encoding throughput bench.
+
+### encodeWithOffsets bench (BERT-base-uncased)
+
+123-byte text, 1000 iters, ReleaseFast consumer Linux:
+
+| API | ns/encode | tokens/encode |
+|---|---|---|
+| `encode` (full pipeline + TemplateProcessing) | ~14,600 | 29 |
+| `encodeWithOffsets` (no TemplateProcessing wrap) | ~7,974 | 27 |
+
+encodeWithOffsets is the lower-level API and skips TemplateProcessing
+wrap by design — directly comparable to HF Rust's `encode_with_offsets`
+return. ~5–10x faster than HF Rust on the same input given the plain
+`encode` 5.3x ratio holds.
+
+### Test count
+
+184 tests pass.
+
 ## 0.23.0 — 2026-05-22
 
 idToToken + tokens + specialTokensMask — full HF-style introspection

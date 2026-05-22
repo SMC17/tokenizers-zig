@@ -1,7 +1,15 @@
 # STATUS
 
-**Version:** v0.23
+**Version:** v0.24
 **Last update:** 2026-05-22
+
+## What landed in v0.24 (on top of v0.23)
+
+- **`bench-offsets-bert`** measures `encodeWithOffsets` throughput.
+- BERT-base-uncased: ~7.9 μs / 27 tokens (encodeWithOffsets, no
+  TemplateProcessing wrap) vs ~14.6 μs / 29 tokens (full encode).
+
+184 tests pass.
 
 ## What landed in v0.23 (on top of v0.22)
 
