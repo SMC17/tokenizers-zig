@@ -1,0 +1,25 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - name: zig version
+        run: zig version
+      - name: zig build test
+        # Cargo-based head-to-head benches under bench/bench_rust* are
+        # intentionally NOT run in CI (require cargo + crates.io fetch
+        # and aren't reproducible quickly). Run zig build test only.
+        run: zig build test --summary all
