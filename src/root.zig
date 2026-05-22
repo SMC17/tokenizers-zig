@@ -355,6 +355,87 @@ pub const Tokenizer = struct {
         alloc.free(batch);
     }
 
+    /// Decode a batch of ID sequences. Each row independently
+    /// reconstructs text via the model + decoder pipeline. Caller frees
+    /// the outer slice + each inner string via `freeDecodeBatch`.
+    pub fn decodeBatch(self: *Tokenizer, alloc: std.mem.Allocator, batches: []const []const u32) ![][]u8 {
+        const out = try alloc.alloc([]u8, batches.len);
+        errdefer alloc.free(out);
+        var done: usize = 0;
+        errdefer for (out[0..done]) |s| alloc.free(s);
+        for (batches, 0..) |ids, i| {
+            out[i] = try self.decode(alloc, ids);
+            done = i + 1;
+        }
+        return out;
+    }
+
+    /// Free a batch returned by `decodeBatch`.
+    pub fn freeDecodeBatch(alloc: std.mem.Allocator, batch: [][]u8) void {
+        for (batch) |s| alloc.free(s);
+        alloc.free(batch);
+    }
+
+    /// Parallel decode (mirrors `encodeBatchParallel`). Workers share
+    /// read-only Tokenizer state. `n_threads <= 1` falls through.
+    pub fn decodeBatchParallel(
+        self: *Tokenizer,
+        alloc: std.mem.Allocator,
+        batches: []const []const u32,
+        n_threads: usize,
+    ) ![][]u8 {
+        if (n_threads <= 1 or batches.len <= 1) return self.decodeBatch(alloc, batches);
+
+        const out = try alloc.alloc([]u8, batches.len);
+        errdefer alloc.free(out);
+        const errs = try alloc.alloc(?anyerror, n_threads);
+        defer alloc.free(errs);
+        @memset(errs, null);
+        const workers = try alloc.alloc(std.Thread, n_threads);
+        defer alloc.free(workers);
+
+        const chunk = (batches.len + n_threads - 1) / n_threads;
+        var spawned: usize = 0;
+        var t: usize = 0;
+        while (t < n_threads) : (t += 1) {
+            const start = t * chunk;
+            if (start >= batches.len) break;
+            const end = @min(start + chunk, batches.len);
+            workers[spawned] = try std.Thread.spawn(.{}, decodeBatchWorker, .{
+                self, alloc, batches[start..end], out[start..end], &errs[t],
+            });
+            spawned += 1;
+        }
+
+        var i: usize = 0;
+        while (i < spawned) : (i += 1) workers[i].join();
+
+        for (errs) |e| if (e) |err| {
+            for (out) |s| if (s.len != 0) alloc.free(s);
+            alloc.free(out);
+            return err;
+        };
+        return out;
+    }
+
+    fn decodeBatchWorker(
+        tok: *Tokenizer,
+        alloc: std.mem.Allocator,
+        batches: []const []const u32,
+        out: [][]u8,
+        err_out: *?anyerror,
+    ) void {
+        for (batches, 0..) |ids, i| {
+            const s = tok.decode(alloc, ids) catch |e| {
+                err_out.* = e;
+                var j = i;
+                while (j < out.len) : (j += 1) out[j] = &[_]u8{};
+                return;
+            };
+            out[i] = s;
+        }
+    }
+
     /// Encode a batch of sentence-pairs. `pairs_a` and `pairs_b` must
     /// have the same length; each row [i] produces `encodePair(a[i], b[i])`.
     /// Caller frees via `freeBatch`.
@@ -2216,6 +2297,60 @@ test "encodeBatchParallel — produces same output as encodeBatch (4 threads)" {
 
     try testing.expectEqual(seq.len, par.len);
     for (seq, par) |s, p| try testing.expectEqualSlices(u32, s, p);
+}
+
+test "decodeBatch — round-trips encodeBatch output" {
+    const json =
+        \\{
+        \\  "version": "1.0",
+        \\  "pre_tokenizer": {"type": "ByteLevel"},
+        \\  "model": {"type": "BPE", "vocab": {"a": 0, "b": 1, "c": 2}, "merges": []}
+        \\}
+    ;
+    var tok = try fromJson(testing.allocator, json);
+    defer tok.deinit();
+
+    const texts = [_][]const u8{ "a", "ab", "abc" };
+    const ids_batch = try tok.encodeBatch(testing.allocator, &texts);
+    defer Tokenizer.freeBatch(testing.allocator, ids_batch);
+
+    const slices = try testing.allocator.alloc([]const u32, ids_batch.len);
+    defer testing.allocator.free(slices);
+    for (ids_batch, 0..) |ids, i| slices[i] = ids;
+
+    const decoded = try tok.decodeBatch(testing.allocator, slices);
+    defer Tokenizer.freeDecodeBatch(testing.allocator, decoded);
+
+    try testing.expectEqualStrings("a", decoded[0]);
+    try testing.expectEqualStrings("ab", decoded[1]);
+    try testing.expectEqualStrings("abc", decoded[2]);
+}
+
+test "decodeBatchParallel — matches sequential output (4 threads)" {
+    const json =
+        \\{
+        \\  "version": "1.0",
+        \\  "pre_tokenizer": {"type": "ByteLevel"},
+        \\  "model": {"type": "BPE", "vocab": {"a": 0, "b": 1, "c": 2, "d": 3}, "merges": []}
+        \\}
+    ;
+    var tok = try fromJson(testing.allocator, json);
+    defer tok.deinit();
+
+    const inputs = [_][]const u32{
+        &[_]u32{ 0, 1 },
+        &[_]u32{ 1, 2, 3 },
+        &[_]u32{0},
+        &[_]u32{ 0, 1, 2, 3 },
+        &[_]u32{ 3, 2, 1, 0 },
+    };
+    const seq = try tok.decodeBatch(testing.allocator, &inputs);
+    defer Tokenizer.freeDecodeBatch(testing.allocator, seq);
+    const par = try tok.decodeBatchParallel(testing.allocator, &inputs, 4);
+    defer Tokenizer.freeDecodeBatch(testing.allocator, par);
+
+    try testing.expectEqual(seq.len, par.len);
+    for (seq, par) |s, p| try testing.expectEqualStrings(s, p);
 }
 
 test "encodeBatchParallel — single thread falls through to sequential" {

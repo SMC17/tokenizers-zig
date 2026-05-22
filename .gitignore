@@ -8,6 +8,10 @@ tests/fixtures/bert-base-uncased-tokenizer.json
 tests/fixtures/t5-base-tokenizer.json
 bench/bench_rust/target/
 bench/bench_rust/Cargo.lock
+bench/bench_rust_bert/target/
+bench/bench_rust_bert/Cargo.lock
+bench/bench_rust_t5/target/
+bench/bench_rust_t5/Cargo.lock
 .DS_Store
 *~
 *.swp
