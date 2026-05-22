@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.2.0 — 2026-05-21
+
+Priority-queue O(n log n) BPE merge replaces O(n²) greedy. **~10x
+speedup** on the real TinyLlama bench (491 μs → 56 μs median).
+Gap to HF Rust upstream closed from ~9x to ~1.2x.
+
+- `src/bpe.zig::bpeEncodePQ`: doubly-linked list of pieces + min-heap
+  of (rank, left_idx) candidates
+- Stale-entry detection: dead-node sentinel (`prev = -2`) on absorbed
+  right-merged nodes + piece-identity snapshot on left + rank re-lookup
+  at pop time (catches downstream-merged neighbors)
+- Encoding byte-identical to v0.1 (33 tokens, matches HF Rust exactly)
+- 23 unit tests pass (no behavioural regression)
+
 ## 0.1.0 — 2026-05-21
 
 Real Llama tokenizer support + audited head-to-head against

@@ -6,6 +6,24 @@ Zig 0.16 BPE tokenizer compatible with the HuggingFace
 
 ## Status
 
+**v0.2 — priority-queue O(n log n) BPE merge. ~10x speedup over
+v0.1. Gap to HF Rust now ~1.2x (was ~9x at v0.1).**
+
+### v0.2 head-to-head (consumer Linux, ReleaseFast, 123-byte sample)
+
+| Implementation | ns/encode (median, 5+ runs) | tokens/encode | ratio |
+|---|---|---|---|
+| `huggingface/tokenizers` 0.21 (Rust) | ~46,000 | 33 | 1.00x (ref) |
+| **tokenizers-zig v0.2** (Zig, PQ + DLL) | **~56,000** | 33 | **~1.2x slower** |
+| tokenizers-zig v0.1 (Zig, O(n²) greedy) | ~491,000 | 33 | ~9x slower |
+
+The v0.2 algorithm maintains a doubly-linked list of pieces plus a
+min-heap of (rank, left_idx) merge candidates. Stale entries are
+detected via (a) a "dead-node" sentinel set on absorbed-right nodes,
+(b) a piece-identity snapshot on the left, and (c) a re-lookup of
+the merge rank at pop time. Same output as v0.1 (33 tokens, matches
+HF Rust exactly).
+
 **v0.1 — real Llama tokenizer.json + SentencePiece normalizer +
 HF Rust head-to-head bench.**
 
