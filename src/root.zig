@@ -37,6 +37,7 @@ pub const Error = error{
     UnsupportedModelType,
     UnsupportedPreTokenizer,
     MissingField,
+    MismatchedBatchSize,
 };
 
 /// Tagged union over the model backends supported by this library.
@@ -88,6 +89,26 @@ pub const TruncationDirection = enum { right, left };
 /// Padding direction applied after encode + truncation.
 pub const PaddingDirection = enum { right, left };
 
+/// A single decoder step parsed from `decoder.decoders[]`. Applied in
+/// order after the model's vocab-string decode.
+pub const DecoderOp = union(enum) {
+    /// Substring replacement (e.g. ▁ → " ").
+    replace: struct { pattern: []const u8, content: []const u8 },
+    /// Expand `<0xXX>` patterns to literal bytes.
+    byte_fallback: void,
+    /// No-op join (the string is already one buffer).
+    fuse: void,
+    /// Trim N codepoints from the start and M codepoints from the end
+    /// matching a specific content character (typically " ").
+    strip: struct { content: []const u8, start: u32, stop: u32 },
+    /// Inverse of ByteLevel pre-tokenize (map ByteLevel codepoints → bytes).
+    byte_level: void,
+    /// Inverse of Metaspace (replacement → " ").
+    metaspace: struct { replacement: []const u8 },
+    /// WordPiece decoder: drop continuation prefix, join.
+    wordpiece_decoder: struct { prefix: []const u8 },
+};
+
 /// Pipeline configuration assembled from a HF tokenizer.json.
 pub const Tokenizer = struct {
     allocator: std.mem.Allocator,
@@ -135,6 +156,10 @@ pub const Tokenizer = struct {
     /// set, decode replaces `<0xXX>` token strings with their literal
     /// byte values after the model's vocab lookup.
     use_byte_fallback: bool,
+    /// Parsed decoder Sequence steps. When non-null, the BPE decode
+    /// path applies these steps in order instead of the implicit
+    /// SP-marker / ByteFallback / strip pipeline.
+    decoder_steps: ?[]const DecoderOp,
     /// Truncation config. When max_length is non-null, encode trims the
     /// output to at most this many tokens from `truncation_direction`.
     max_length: ?u32,
@@ -215,6 +240,50 @@ pub const Tokenizer = struct {
             return out.toOwnedSlice(alloc);
         }
         return self.encodeChunk(alloc, text);
+    }
+
+    /// Encode a batch of independent texts. Each text runs through the
+    /// full encode pipeline (TemplateProcessing + truncation + padding).
+    /// Returned slice owns the outer array; each inner []u32 is also
+    /// owned. Caller frees both via `freeBatch`.
+    pub fn encodeBatch(self: *Tokenizer, alloc: std.mem.Allocator, texts: []const []const u8) ![][]u32 {
+        const out = try alloc.alloc([]u32, texts.len);
+        errdefer alloc.free(out);
+        var done: usize = 0;
+        errdefer for (out[0..done]) |ids| alloc.free(ids);
+        for (texts, 0..) |t, i| {
+            out[i] = try self.encode(alloc, t);
+            done = i + 1;
+        }
+        return out;
+    }
+
+    /// Free a batch returned by `encodeBatch`. Frees the inner []u32
+    /// slices and the outer [][]u32 slice.
+    pub fn freeBatch(alloc: std.mem.Allocator, batch: [][]u32) void {
+        for (batch) |ids| alloc.free(ids);
+        alloc.free(batch);
+    }
+
+    /// Encode a batch of sentence-pairs. `pairs_a` and `pairs_b` must
+    /// have the same length; each row [i] produces `encodePair(a[i], b[i])`.
+    /// Caller frees via `freeBatch`.
+    pub fn encodeBatchPair(
+        self: *Tokenizer,
+        alloc: std.mem.Allocator,
+        pairs_a: []const []const u8,
+        pairs_b: []const []const u8,
+    ) ![][]u32 {
+        if (pairs_a.len != pairs_b.len) return error.MismatchedBatchSize;
+        const out = try alloc.alloc([]u32, pairs_a.len);
+        errdefer alloc.free(out);
+        var done: usize = 0;
+        errdefer for (out[0..done]) |ids| alloc.free(ids);
+        for (pairs_a, pairs_b, 0..) |a, b, i| {
+            out[i] = try self.encodePair(alloc, a, b);
+            done = i + 1;
+        }
+        return out;
     }
 
     /// Encode a sentence-pair into one ID sequence. Applies the
@@ -473,8 +542,13 @@ pub const Tokenizer = struct {
                 const raw = try m.decode(alloc, ids);
                 defer alloc.free(raw);
 
-                // ByteFallback (Llama family): `<0xXX>` token strings
-                // expand to literal byte XX before any other post-processing.
+                // Explicit decoder Sequence path: when parsed from
+                // tokenizer.json, apply each step in order.
+                if (self.decoder_steps) |steps| {
+                    return applyDecoderSteps(alloc, raw, steps);
+                }
+
+                // Implicit fallback path (matches v0.4-v0.6 behaviour).
                 const after_bf: []u8 = if (self.use_byte_fallback)
                     try applyByteFallback(alloc, raw)
                 else
@@ -648,12 +722,16 @@ pub fn fromJson(alloc: std.mem.Allocator, json_bytes: []const u8) !Tokenizer {
         }
     }
 
-    // Decoder (optional). We scan for ByteFallback presence (anywhere
-    // in a possibly-nested Sequence) so the decode path knows to
-    // expand `<0xXX>` tokens to bytes.
+    // Decoder (optional). Two complementary outputs:
+    //   - use_byte_fallback: legacy flag for the implicit decode path
+    //   - decoder_steps: parsed Sequence for the explicit decode path
     var use_byte_fallback = false;
+    var decoder_steps: ?[]const DecoderOp = null;
     if (root.get("decoder")) |dv| {
-        if (dv == .object) scanByteFallback(dv.object, &use_byte_fallback);
+        if (dv == .object) {
+            scanByteFallback(dv.object, &use_byte_fallback);
+            decoder_steps = try parseDecoderSequence(aa, dv.object);
+        }
     }
 
     // Post-processor (TemplateProcessing single + pair templates).
@@ -727,12 +805,95 @@ pub fn fromJson(alloc: std.mem.Allocator, json_bytes: []const u8) !Tokenizer {
         .template_single = template_single,
         .template_pair = template_pair,
         .use_byte_fallback = use_byte_fallback,
+        .decoder_steps = decoder_steps,
         .max_length = max_length,
         .truncation_direction = truncation_direction,
         .pad_to_length = pad_to_length,
         .pad_token_id = pad_token_id,
         .padding_direction = padding_direction,
     };
+}
+
+/// Parse a `decoder` object into an ordered `[]DecoderOp`. Returns null
+/// when the decoder is a single non-Sequence node (the legacy implicit
+/// path will handle it) or when the type is unsupported. The Sequence
+/// node walks its `decoders[]` array and emits one DecoderOp per child.
+fn parseDecoderSequence(aa: std.mem.Allocator, obj: std.json.ObjectMap) !?[]const DecoderOp {
+    const tv = obj.get("type") orelse return null;
+    if (tv != .string) return null;
+    if (!std.mem.eql(u8, tv.string, "Sequence")) return null;
+    const arr_v = obj.get("decoders") orelse return null;
+    if (arr_v != .array) return null;
+
+    var ops: std.ArrayList(DecoderOp) = .empty;
+    errdefer ops.deinit(aa);
+    for (arr_v.array.items) |item| {
+        if (item != .object) continue;
+        const inner_tv = item.object.get("type") orelse continue;
+        if (inner_tv != .string) continue;
+        const t = inner_tv.string;
+
+        if (std.mem.eql(u8, t, "Replace")) {
+            const pat_v = item.object.get("pattern") orelse continue;
+            const content_v = item.object.get("content") orelse continue;
+            if (content_v != .string) continue;
+            var pattern: []const u8 = "";
+            if (pat_v == .object) {
+                if (pat_v.object.get("String")) |sv| {
+                    if (sv == .string) pattern = sv.string;
+                }
+            } else if (pat_v == .string) {
+                pattern = pat_v.string;
+            }
+            try ops.append(aa, .{ .replace = .{
+                .pattern = try aa.dupe(u8, pattern),
+                .content = try aa.dupe(u8, content_v.string),
+            } });
+        } else if (std.mem.eql(u8, t, "ByteFallback")) {
+            try ops.append(aa, .byte_fallback);
+        } else if (std.mem.eql(u8, t, "Fuse")) {
+            try ops.append(aa, .fuse);
+        } else if (std.mem.eql(u8, t, "Strip")) {
+            var content: []const u8 = " ";
+            var start: u32 = 0;
+            var stop: u32 = 0;
+            if (item.object.get("content")) |cv| {
+                if (cv == .string) content = cv.string;
+            }
+            if (item.object.get("start")) |sv| {
+                if (sv == .integer) start = @intCast(sv.integer);
+            }
+            if (item.object.get("stop")) |sv2| {
+                if (sv2 == .integer) stop = @intCast(sv2.integer);
+            }
+            try ops.append(aa, .{ .strip = .{
+                .content = try aa.dupe(u8, content),
+                .start = start,
+                .stop = stop,
+            } });
+        } else if (std.mem.eql(u8, t, "ByteLevel")) {
+            try ops.append(aa, .byte_level);
+        } else if (std.mem.eql(u8, t, "Metaspace")) {
+            var replacement: []const u8 = "\u{2581}";
+            if (item.object.get("replacement")) |rv| {
+                if (rv == .string) replacement = rv.string;
+            }
+            try ops.append(aa, .{ .metaspace = .{
+                .replacement = try aa.dupe(u8, replacement),
+            } });
+        } else if (std.mem.eql(u8, t, "WordPiece")) {
+            var prefix: []const u8 = "##";
+            if (item.object.get("prefix")) |pv| {
+                if (pv == .string) prefix = pv.string;
+            }
+            try ops.append(aa, .{ .wordpiece_decoder = .{
+                .prefix = try aa.dupe(u8, prefix),
+            } });
+        }
+        // Unknown decoder types silently dropped.
+    }
+
+    return try aa.dupe(DecoderOp, ops.items);
 }
 
 /// Recursive scan: set out to true if any `ByteFallback` decoder node
@@ -873,6 +1034,65 @@ fn parsePreTokenizer(
         }
     }
     // Unknown pre-tokenizer types are silently skipped (degrade gracefully).
+}
+
+/// Apply a parsed decoder Sequence to the raw model-decoded string.
+/// Each step transforms the string in place; the result is owned and
+/// freed by the caller.
+fn applyDecoderSteps(alloc: std.mem.Allocator, raw: []const u8, steps: []const DecoderOp) ![]u8 {
+    var current: []u8 = try alloc.dupe(u8, raw);
+    errdefer alloc.free(current);
+
+    for (steps) |step| {
+        const next: []u8 = switch (step) {
+            .replace => |r| try normalizer.apply(alloc, .{ .replace = .{ .pattern = r.pattern, .content = r.content } }, current),
+            .byte_fallback => try applyByteFallback(alloc, current),
+            .fuse => try alloc.dupe(u8, current),
+            .strip => |s| try applyStrip(alloc, current, s.content, s.start, s.stop),
+            .byte_level => try byte_level.decode(alloc, current),
+            .metaspace => |m| try normalizer.apply(alloc, .{ .replace = .{ .pattern = m.replacement, .content = " " } }, current),
+            .wordpiece_decoder => |w| try applyWordpieceDecode(alloc, current, w.prefix),
+        };
+        alloc.free(current);
+        current = next;
+    }
+    return current;
+}
+
+/// Strip `start` codepoints from the front and `stop` codepoints from
+/// the end that match `content` (typically " "). Matches HF Rust's
+/// Strip decoder semantics.
+fn applyStrip(alloc: std.mem.Allocator, text: []const u8, content: []const u8, start: u32, stop: u32) ![]u8 {
+    if (content.len == 0) return alloc.dupe(u8, text);
+    var begin: usize = 0;
+    var end: usize = text.len;
+
+    var stripped_start: u32 = 0;
+    while (stripped_start < start and begin + content.len <= end) {
+        if (!std.mem.eql(u8, text[begin .. begin + content.len], content)) break;
+        begin += content.len;
+        stripped_start += 1;
+    }
+
+    var stripped_stop: u32 = 0;
+    while (stripped_stop < stop and begin + content.len <= end) {
+        if (!std.mem.eql(u8, text[end - content.len .. end], content)) break;
+        end -= content.len;
+        stripped_stop += 1;
+    }
+
+    return alloc.dupe(u8, text[begin..end]);
+}
+
+/// WordPiece decoder: at the decode-step level we receive the
+/// already-concatenated string from `wordpiece.Model.decode`, which has
+/// rejoined ##-continuations and space-separated root tokens. The
+/// WordPiece decoder step in a Sequence is therefore a no-op
+/// pass-through here. Future work may post-process prefix variants that
+/// survived the model-internal decoder.
+fn applyWordpieceDecode(alloc: std.mem.Allocator, text: []const u8, prefix: []const u8) ![]u8 {
+    _ = prefix;
+    return alloc.dupe(u8, text);
 }
 
 /// ByteFallback expansion: scan `text` for occurrences of `<0xXX>`
@@ -1561,6 +1781,79 @@ test "applyByteFallback — non-pattern angle brackets pass through" {
     const out = try applyByteFallback(testing.allocator, "<unk>");
     defer testing.allocator.free(out);
     try testing.expectEqualStrings("<unk>", out);
+}
+
+test "Decoder Sequence — Replace + ByteFallback + Strip applied in order" {
+    const json =
+        \\{
+        \\  "version": "1.0",
+        \\  "decoder": {
+        \\    "type": "Sequence",
+        \\    "decoders": [
+        \\      {"type": "Replace", "pattern": {"String": "▁"}, "content": " "},
+        \\      {"type": "ByteFallback"},
+        \\      {"type": "Fuse"},
+        \\      {"type": "Strip", "content": " ", "start": 1, "stop": 0}
+        \\    ]
+        \\  },
+        \\  "model": {
+        \\    "type": "BPE",
+        \\    "vocab": {"▁H": 0, "i": 1, "<0x20>": 2, "wld": 3},
+        \\    "merges": []
+        \\  }
+        \\}
+    ;
+    var tok = try fromJson(testing.allocator, json);
+    defer tok.deinit();
+    try testing.expect(tok.decoder_steps != null);
+    try testing.expectEqual(@as(usize, 4), tok.decoder_steps.?.len);
+
+    // ids [0, 1, 2, 3] → vocab strings "▁H" + "i" + "<0x20>" + "wld"
+    // → "▁Hi<0x20>wld"
+    // → Replace ▁→" " → " Hi<0x20>wld"
+    // → ByteFallback <0x20>→" " → " Hi wld"
+    // → Fuse (no-op) → " Hi wld"
+    // → Strip start=1 (drop leading " ") → "Hi wld"
+    const back = try tok.decode(testing.allocator, &[_]u32{ 0, 1, 2, 3 });
+    defer testing.allocator.free(back);
+    try testing.expectEqualStrings("Hi wld", back);
+}
+
+test "encodeBatch — encodes multiple texts independently" {
+    const json =
+        \\{
+        \\  "version": "1.0",
+        \\  "pre_tokenizer": {"type": "ByteLevel"},
+        \\  "model": {"type": "BPE", "vocab": {"a": 0, "b": 1, "c": 2}, "merges": []}
+        \\}
+    ;
+    var tok = try fromJson(testing.allocator, json);
+    defer tok.deinit();
+
+    const texts = [_][]const u8{ "a", "ab", "abc" };
+    const batch = try tok.encodeBatch(testing.allocator, &texts);
+    defer Tokenizer.freeBatch(testing.allocator, batch);
+
+    try testing.expectEqual(@as(usize, 3), batch.len);
+    try testing.expectEqualSlices(u32, &[_]u32{0}, batch[0]);
+    try testing.expectEqualSlices(u32, &[_]u32{ 0, 1 }, batch[1]);
+    try testing.expectEqualSlices(u32, &[_]u32{ 0, 1, 2 }, batch[2]);
+}
+
+test "encodeBatch — empty batch returns empty slice" {
+    const json =
+        \\{
+        \\  "version": "1.0",
+        \\  "pre_tokenizer": {"type": "ByteLevel"},
+        \\  "model": {"type": "BPE", "vocab": {"a": 0}, "merges": []}
+        \\}
+    ;
+    var tok = try fromJson(testing.allocator, json);
+    defer tok.deinit();
+
+    const batch = try tok.encodeBatch(testing.allocator, &[_][]const u8{});
+    defer Tokenizer.freeBatch(testing.allocator, batch);
+    try testing.expectEqual(@as(usize, 0), batch.len);
 }
 
 test "TemplateProcessing pair — synthetic [BOS] A [SEP] B [SEP] template" {
