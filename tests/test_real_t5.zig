@@ -116,6 +116,30 @@ test "real t5-base — encode 'hello </s>' produces [▁hello, </s>, </s>]" {
     try std.testing.expectEqualSlices(u32, &[_]u32{ 21820, 1, 1 }, ids);
 }
 
+test "real t5-base — encodeWithOffsets gives sub-token byte ranges" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    try skipIfMissing(io);
+
+    var tok = try loadTokenizer(alloc, io);
+    defer tok.deinit();
+
+    const text = "hello world";
+    const r = try tok.encodeWithOffsets(alloc, text);
+    defer r.deinit(alloc);
+
+    // T5 Unigram on "hello world" emits [▁hello=21820, ▁world=296]
+    // (▁world id may vary; the important check is offsets).
+    try std.testing.expect(r.ids.len == 2);
+    try std.testing.expectEqual(@as(u32, 21820), r.ids[0]);
+    // ▁hello covers bytes [0, 5) of "hello world".
+    try std.testing.expectEqual(@as(u32, 0), r.offsets[0].start);
+    try std.testing.expectEqual(@as(u32, 5), r.offsets[0].end);
+    // ▁world covers bytes [6, 11).
+    try std.testing.expectEqual(@as(u32, 6), r.offsets[1].start);
+    try std.testing.expectEqual(@as(u32, 11), r.offsets[1].end);
+}
+
 test "real t5-base — encode + decode round-trip emits text with appended </s>" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;

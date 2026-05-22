@@ -91,6 +91,40 @@ test "real TinyLlama — encode prepends BOS via TemplateProcessing" {
     try std.testing.expectEqualSlices(u32, &expected, ids);
 }
 
+test "real TinyLlama — encodeWithOffsets gives byte ranges per token" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    var f = std.Io.Dir.cwd().openFile(io, fixture_path, .{ .mode = .read_only }) catch |err| switch (err) {
+        error.FileNotFound => return error.SkipZigTest,
+        else => return err,
+    };
+    f.close(io);
+
+    var tok = try loadTokenizer(alloc, io);
+    defer tok.deinit();
+
+    const text = "Hello world";
+    const r = try tok.encodeWithOffsets(alloc, text);
+    defer r.deinit(alloc);
+
+    // TinyLlama BPE+SP. encodeWithOffsets returns raw model output
+    // (no TemplateProcessing wrap). First real token is "▁Hello"=15043.
+    try std.testing.expect(r.ids.len >= 1);
+    try std.testing.expectEqual(@as(u32, 15043), r.ids[0]);
+    // First token covers "Hello" → starts at byte 0.
+    try std.testing.expectEqual(@as(u32, 0), r.offsets[0].start);
+    // All offsets stay within the text bounds + monotonic non-decreasing.
+    var prev_end: u32 = 0;
+    for (r.offsets) |off| {
+        try std.testing.expect(off.start <= text.len);
+        try std.testing.expect(off.end <= text.len);
+        try std.testing.expect(off.start <= off.end);
+        try std.testing.expect(off.start >= prev_end);
+        prev_end = off.end;
+    }
+}
+
 test "real TinyLlama — encodeBase + decode round-trip preserves text" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;

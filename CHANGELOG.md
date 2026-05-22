@@ -1,5 +1,48 @@
 # Changelog
 
+## 0.20.0 — 2026-05-22
+
+Real-fixture integration tests for sub-token offsets across all
+three downloaded tokenizers. 181 tests pass.
+
+### Real BERT-base-uncased offset test
+
+```
+encodeWithOffsets("hello, world!")
+→ ids    = [7592, 1010, 2088, 999]    (hello, ",", world, "!")
+→ offsets= [[0,5], [5,6], [7,12], [12,13]]
+```
+
+Each token's byte range maps back to its source span in the original
+input.
+
+### Real T5-base offset test
+
+```
+encodeWithOffsets("hello world")
+→ ids    = [▁hello=21820, ▁world=...]
+→ offsets= [[0,5], [6,11]]
+```
+
+Each Unigram segment's offset reflects its byte span in the original
+input (with the Metaspace ▁-prefix correctly subtracted).
+
+### Real TinyLlama offset test
+
+```
+encodeWithOffsets("Hello world")
+→ ids[0] = 15043 (▁Hello)
+→ offsets[0].start = 0
+→ monotonic non-decreasing offsets within text bounds
+```
+
+The Llama BPE+SP-marker pipeline correctly remaps the synthetic ▁
+prefixes through the normalizer offset chain.
+
+### Test count
+
+181 tests pass.
+
 ## 0.19.0 — 2026-05-22
 
 Sub-token offsets for BPE+SP marker (Llama, Mistral) via normalizer
