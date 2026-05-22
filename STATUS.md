@@ -1,7 +1,17 @@
 # STATUS
 
-**Version:** v0.20
+**Version:** v0.21
 **Last update:** 2026-05-22
+
+## What landed in v0.21 (on top of v0.20)
+
+- **`encodeBatchWithOffsets(texts)`** — batch encode returning
+  per-text ids + offsets.
+- **`encodeBatchParallelWithOffsets(texts, n_threads)`** — std.Thread
+  fan-out; falls through to sequential when `n_threads <= 1`.
+- Parallel output verified byte-identical to sequential in tests.
+
+182 tests pass.
 
 ## What landed in v0.20 (on top of v0.19)
 
