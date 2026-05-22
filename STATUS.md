@@ -1,7 +1,19 @@
 # STATUS
 
-**Version:** v0.7
+**Version:** v0.8
 **Last update:** 2026-05-22
+
+## What landed in v0.8 (on top of v0.7)
+
+- **`encodeBatchParallel(texts, n_threads)`** — std.Thread-based
+  parallel batch encode. Tokenizer state shared read-only across
+  workers. Falls through to sequential when `n_threads <= 1`.
+- **`bench/bench_parallel_bert.zig`** — scaling bench at 1/2/4/8
+  threads on 200×123-byte BERT inputs. Real scaling observed: 1.87x
+  speedup at 4 threads (4c/8t consumer CPU); HT contention regression
+  past 4.
+
+140 tests pass.
 
 ## What landed in v0.7 (on top of v0.6)
 

@@ -112,6 +112,7 @@ pub fn build(b: *std.Build) void {
         .{ "bench/bench_real_tinyllama.zig", "bench-real-tinyllama", "Bench real TinyLlama encode" },
         .{ "bench/bench_real_bert.zig", "bench-real-bert", "Bench real BERT-base-uncased encode" },
         .{ "bench/bench_real_t5.zig", "bench-real-t5", "Bench real T5-base encode" },
+        .{ "bench/bench_parallel_bert.zig", "bench-parallel-bert", "Bench BERT parallel encodeBatch scaling" },
     }) |bench_spec| {
         const bm = b.createModule(.{
             .root_source_file = b.path(bench_spec[0]),
