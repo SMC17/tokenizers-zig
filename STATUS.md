@@ -1,7 +1,25 @@
 # STATUS
 
-**Version:** v0.5
+**Version:** v0.6
 **Last update:** 2026-05-21
+
+## What landed in v0.6 (on top of v0.5)
+
+- **`handle_chinese_chars`** normalizer — wraps CJK ideographs in
+  spaces. Coverage: CJK Unified Ideographs, Extension A, Compatibility
+  Ideographs (basic plane).
+- **`clean_text`** normalizer — drops control chars + replaces Unicode
+  whitespace variants with ASCII space.
+- **BertNormalizer** parses the full HF chain
+  `Sequence([clean_text, handle_chinese_chars, NFD, strip_accents,
+  lowercase])` based on individual flags.
+- **First-byte index for added_tokens** — encode scan goes from
+  O(N_added) per position to O(K_byte). Effectively free for natural
+  text (no special-token characters). Helps T5 (103 added_tokens) and
+  any multilingual tokenizer with large sentinel sets.
+
+129 unit + integration tests pass; real-BERT canonical IDs validate
+the composed normalizer chain.
 
 ## What landed in v0.5 (on top of v0.4)
 

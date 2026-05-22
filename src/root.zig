@@ -119,6 +119,12 @@ pub const Tokenizer = struct {
     added_tokens: []AddedToken,
     /// id → content lookup for decode.
     added_token_by_id: std.AutoHashMap(u32, []const u8),
+    /// First-byte → indices-into-added_tokens index. Cuts the per-
+    /// position match cost from O(N) to O(matches-with-this-first-byte).
+    /// Each entry is a slice into `added_index_storage`.
+    added_token_by_first_byte: [256][]const u32,
+    /// Backing storage for added_token_by_first_byte slices.
+    added_index_storage: []u32,
     /// TemplateProcessing single-input template. When non-null, applied
     /// to the encoded ID sequence to wrap with BOS/EOS/CLS/SEP markers.
     template_single: ?[]const TemplateOp,
@@ -147,14 +153,15 @@ pub const Tokenizer = struct {
     }
 
     /// Find the longest added-token matching `text` at byte position `pos`.
-    /// Returns null if no added token matches. O(N_added) per position; the
-    /// first-byte filter cuts most of the constant.
+    /// Uses the per-first-byte index built at fromJson — O(K_byte) where
+    /// K_byte is the number of added tokens sharing this first byte (much
+    /// less than total N for typical tokenizer.json files).
     fn matchAddedToken(self: *const Tokenizer, text: []const u8, pos: usize) ?AddedToken {
+        const candidates = self.added_token_by_first_byte[text[pos]];
         var best: ?AddedToken = null;
-        for (self.added_tokens) |at| {
-            if (at.content.len == 0) continue;
+        for (candidates) |idx| {
+            const at = self.added_tokens[idx];
             if (pos + at.content.len > text.len) continue;
-            if (text[pos] != at.content[0]) continue;
             if (!std.mem.eql(u8, text[pos .. pos + at.content.len], at.content)) continue;
             if (best == null or at.content.len > best.?.content.len) best = at;
         }
@@ -611,6 +618,36 @@ pub fn fromJson(alloc: std.mem.Allocator, json_bytes: []const u8) !Tokenizer {
     }
     const added_tokens = try aa.dupe(AddedToken, added_list.items);
 
+    // Build first-byte index for the longest-match scan in encode.
+    // For each byte b ∈ 0..255, collect indices of added_tokens whose
+    // content starts with that byte. Total storage = sum of lengths.
+    var added_index_storage: []u32 = &[_]u32{};
+    var added_token_by_first_byte: [256][]const u32 = .{&[_]u32{}} ** 256;
+    if (added_tokens.len > 0) {
+        var counts: [256]u32 = .{0} ** 256;
+        for (added_tokens) |at| {
+            if (at.content.len == 0) continue;
+            counts[at.content[0]] += 1;
+        }
+        var total: u32 = 0;
+        var offsets: [256]u32 = .{0} ** 256;
+        for (counts, 0..) |c, b| {
+            offsets[b] = total;
+            total += c;
+        }
+        added_index_storage = try aa.alloc(u32, total);
+        var cursors: [256]u32 = .{0} ** 256;
+        for (added_tokens, 0..) |at, i| {
+            if (at.content.len == 0) continue;
+            const b = at.content[0];
+            added_index_storage[offsets[b] + cursors[b]] = @intCast(i);
+            cursors[b] += 1;
+        }
+        for (counts, 0..) |c, b| {
+            added_token_by_first_byte[b] = added_index_storage[offsets[b] .. offsets[b] + c];
+        }
+    }
+
     // Decoder (optional). We scan for ByteFallback presence (anywhere
     // in a possibly-nested Sequence) so the decode path knows to
     // expand `<0xXX>` tokens to bytes.
@@ -685,6 +722,8 @@ pub fn fromJson(alloc: std.mem.Allocator, json_bytes: []const u8) !Tokenizer {
         .sp_space_marker = sp_marker,
         .added_tokens = added_tokens,
         .added_token_by_id = added_by_id,
+        .added_token_by_first_byte = added_token_by_first_byte,
+        .added_index_storage = added_index_storage,
         .template_single = template_single,
         .template_pair = template_pair,
         .use_byte_fallback = use_byte_fallback,
@@ -1142,35 +1181,47 @@ fn parseNormalizer(
     if (std.mem.eql(u8, t, "NFKD")) return .nfkd;
     if (std.mem.eql(u8, t, "StripAccents")) return .strip_accents;
     if (std.mem.eql(u8, t, "BertNormalizer")) {
-        // BertNormalizer config: clean_text, handle_chinese_chars,
-        // strip_accents, lowercase. We support strip_accents + lowercase
-        // (composed via Sequence). clean_text + handle_chinese_chars
-        // remain v0.5+ work.
-        var do_lower = true;
+        // BertNormalizer composes (in order): clean_text →
+        // handle_chinese_chars → NFD → strip_accents → lowercase.
+        // Each step is opt-in via the corresponding JSON flag; the
+        // composition matches HF Rust's BertNormalizer::new pipeline.
+        var do_clean_text = true; // HF default
+        var do_handle_chinese = true; // HF default
+        var do_lower = true; // HF default
         var do_strip_accents = false;
+        var strip_accents_set_explicitly = false;
+        if (obj.get("clean_text")) |cv| {
+            if (cv == .bool) do_clean_text = cv.bool;
+        }
+        if (obj.get("handle_chinese_chars")) |hv| {
+            if (hv == .bool) do_handle_chinese = hv.bool;
+        }
         if (obj.get("lowercase")) |lv| {
             if (lv == .bool) do_lower = lv.bool;
         }
         if (obj.get("strip_accents")) |sv| {
-            if (sv == .bool) do_strip_accents = sv.bool;
-            // strip_accents = null in JSON defaults to true if lowercase=true
-            // (BERT-uncased convention). Some BERT-cased configs disable it.
+            if (sv == .bool) {
+                do_strip_accents = sv.bool;
+                strip_accents_set_explicitly = true;
+            }
         }
-        if (do_strip_accents and do_lower) {
-            const seq = try aa.alloc(normalizer.NormalizerKind, 3);
-            seq[0] = .nfd;
-            seq[1] = .strip_accents;
-            seq[2] = .lowercase;
-            return .{ .sequence = seq };
-        }
-        if (do_lower) return .lowercase;
+        // HF rule: when strip_accents is null in JSON, default to
+        // do_lower's value (uncased = strip; cased = keep).
+        if (!strip_accents_set_explicitly) do_strip_accents = do_lower;
+
+        var steps: std.ArrayList(normalizer.NormalizerKind) = .empty;
+        defer steps.deinit(aa);
+        if (do_clean_text) try steps.append(aa, .clean_text);
+        if (do_handle_chinese) try steps.append(aa, .handle_chinese_chars);
         if (do_strip_accents) {
-            const seq = try aa.alloc(normalizer.NormalizerKind, 2);
-            seq[0] = .nfd;
-            seq[1] = .strip_accents;
-            return .{ .sequence = seq };
+            try steps.append(aa, .nfd);
+            try steps.append(aa, .strip_accents);
         }
-        return .none;
+        if (do_lower) try steps.append(aa, .lowercase);
+
+        if (steps.items.len == 0) return .none;
+        if (steps.items.len == 1) return steps.items[0];
+        return .{ .sequence = try aa.dupe(normalizer.NormalizerKind, steps.items) };
     }
     return .none;
 }

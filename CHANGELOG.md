@@ -1,5 +1,42 @@
 # Changelog
 
+## 0.6.0 — 2026-05-21
+
+BertNormalizer full composition (clean_text + handle_chinese_chars +
+NFD + strip_accents + lowercase) + first-byte index for added_tokens
+scan. 129 tests pass.
+
+### Normalizers
+
+- **`handle_chinese_chars`** — surrounds CJK ideographs with spaces
+  before whitespace pre-tokenize. Coverage: CJK Unified Ideographs,
+  Extension A, Compatibility Ideographs. Higher SMP planes (Ext B+) are
+  v0.7 work (requires widening codepoint types beyond u21 for switch
+  range syntax).
+- **`clean_text`** — drops NULL / U+FFFD / Cc control chars (except
+  tab/LF/CR) and normalizes Unicode whitespace variants to ASCII space.
+- **BertNormalizer** parser composes the full canonical chain:
+  `Sequence([clean_text, handle_chinese_chars, NFD, strip_accents,
+  lowercase])`. Each step is opt-in via its JSON flag; defaults match
+  HF Rust (`clean_text=true`, `handle_chinese_chars=true`,
+  `lowercase=true`, `strip_accents=null` → defaults to lowercase).
+
+### added_tokens first-byte index
+
+- `fromJson` precomputes a `[256]ArrayList(u32)` index from first byte
+  to candidate added-token indices. `matchAddedToken` now scans only
+  the candidates whose first byte matches the current input byte —
+  drops the per-position cost from O(N_added) to O(K_byte) where
+  K_byte is much smaller (typically 1–3 for natural text).
+- T5-base has 103 added_tokens; the index makes the scan effectively
+  free for non-`<` input bytes (which is ~all of natural text).
+
+### Test count
+
+129 unit + integration tests pass. Real-BERT canonical IDs still match
+exactly through the new five-step normalizer chain — strong validation
+that the composition is sound.
+
 ## 0.5.0 — 2026-05-21
 
 TemplateProcessing pair templates, BertNormalizer strip_accents,
