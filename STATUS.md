@@ -1,7 +1,19 @@
 # STATUS
 
-**Version:** v0.8
+**Version:** v0.9
 **Last update:** 2026-05-22
+
+## What landed in v0.9 (on top of v0.8)
+
+- **Token type IDs return** — new `EncodeResult { ids, type_ids }`
+  with `encodeWithTypes` and `encodePairWithTypes` APIs.
+- `TemplateOp` refactored to a `{kind, type_id}` struct; parser reads
+  `type_id` from each template entry. BERT pair encode now produces
+  canonical `token_type_ids = [0, 0, 0, 1, 1]` on `("hello", "world")`,
+  matching HF exactly.
+- Truncation + padding apply symmetrically to both arrays.
+
+143 tests pass.
 
 ## What landed in v0.8 (on top of v0.7)
 
