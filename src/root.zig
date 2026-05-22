@@ -307,9 +307,9 @@ pub const Tokenizer = struct {
     ) !void {
         const chunk_text = text[start..end];
         if (self.model == .wordpiece and self.use_whitespace_split) {
-            // Word-level offset tracking: walk the chunk byte-by-byte,
-            // splitting on whitespace; for each non-empty word emit
-            // ids tagged with its byte range in `text`.
+            // Sub-word offset tracking via wordpiece.encodeWithOffsets:
+            // each piece gets its true byte range within the word, and
+            // we shift to absolute positions in `text`.
             var i: usize = 0;
             while (i < chunk_text.len) {
                 while (i < chunk_text.len and isWhitespaceByte(chunk_text[i])) i += 1;
@@ -318,18 +318,22 @@ pub const Tokenizer = struct {
                 const word_end = i;
                 if (word_end > word_start) {
                     const word = chunk_text[word_start..word_end];
-                    const abs_start: u32 = @intCast(start + word_start);
-                    const abs_end: u32 = @intCast(start + word_end);
-                    const before = ids_out.items.len;
+                    const abs_word_start: u32 = @intCast(start + word_start);
                     if (self.split_on_punctuation) {
-                        try encodePunctSplit(alloc, &self.model.wordpiece, ids_out, word);
+                        // Walk punctuation-split sub-chunks within the word.
+                        try encodeWordPunctSplitWithOffsets(self, alloc, word, abs_word_start, ids_out, off_out);
                     } else {
-                        const word_ids = try self.model.wordpiece.encode(alloc, word);
-                        defer alloc.free(word_ids);
-                        try ids_out.appendSlice(alloc, word_ids);
+                        const r = try self.model.wordpiece.encodeWithOffsets(alloc, word);
+                        defer alloc.free(r.ids);
+                        defer alloc.free(r.offsets);
+                        for (r.ids, r.offsets) |id, off| {
+                            try ids_out.append(alloc, id);
+                            try off_out.append(alloc, .{
+                                .start = abs_word_start + off[0],
+                                .end = abs_word_start + off[1],
+                            });
+                        }
                     }
-                    const added = ids_out.items.len - before;
-                    try off_out.appendNTimes(alloc, .{ .start = abs_start, .end = abs_end }, added);
                 }
             }
             return;
@@ -1469,6 +1473,65 @@ fn isWhitespaceByte(b: u8) bool {
     return b == ' ' or b == '\t' or b == '\n' or b == '\r' or b == 0x0B or b == 0x0C;
 }
 
+/// Helper for encodeChunkWithOffsets: walk a single word's punctuation-
+/// split pieces, encode each through WordPiece with offsets, shift to
+/// absolute positions.
+fn encodeWordPunctSplitWithOffsets(
+    self: *Tokenizer,
+    alloc: std.mem.Allocator,
+    word: []const u8,
+    word_abs_start: u32,
+    ids_out: *std.ArrayList(u32),
+    off_out: *std.ArrayList(TokenOffset),
+) !void {
+    var i: usize = 0;
+    var piece_start: usize = 0;
+    while (i < word.len) {
+        const n = std.unicode.utf8ByteSequenceLength(word[i]) catch {
+            i += 1;
+            continue;
+        };
+        if (i + n > word.len) break;
+        const cp: u21 = std.unicode.utf8Decode(word[i..][0..n]) catch {
+            i += n;
+            continue;
+        };
+        if (isUnicodePunct(cp)) {
+            if (i > piece_start) {
+                try encodePieceWithOffsets(self, alloc, word[piece_start..i], word_abs_start + @as(u32, @intCast(piece_start)), ids_out, off_out);
+            }
+            try encodePieceWithOffsets(self, alloc, word[i .. i + n], word_abs_start + @as(u32, @intCast(i)), ids_out, off_out);
+            i += n;
+            piece_start = i;
+        } else {
+            i += n;
+        }
+    }
+    if (piece_start < word.len) {
+        try encodePieceWithOffsets(self, alloc, word[piece_start..], word_abs_start + @as(u32, @intCast(piece_start)), ids_out, off_out);
+    }
+}
+
+fn encodePieceWithOffsets(
+    self: *Tokenizer,
+    alloc: std.mem.Allocator,
+    piece: []const u8,
+    abs_start: u32,
+    ids_out: *std.ArrayList(u32),
+    off_out: *std.ArrayList(TokenOffset),
+) !void {
+    const r = try self.model.wordpiece.encodeWithOffsets(alloc, piece);
+    defer alloc.free(r.ids);
+    defer alloc.free(r.offsets);
+    for (r.ids, r.offsets) |id, off| {
+        try ids_out.append(alloc, id);
+        try off_out.append(alloc, .{
+            .start = abs_start + off[0],
+            .end = abs_start + off[1],
+        });
+    }
+}
+
 /// Apply truncation + padding to ids + type_ids + attention_mask
 /// arrays in lockstep. Padding type_ids are 0 and padding attention
 /// mask bits are 0 (marking padding for downstream consumers).
@@ -2461,14 +2524,14 @@ test "encodeBatchParallel — produces same output as encodeBatch (4 threads)" {
     for (seq, par) |s, p| try testing.expectEqualSlices(u32, s, p);
 }
 
-test "encodeWithOffsets — WordPiece synthetic tags per-word ranges" {
+test "encodeWithOffsets — WordPiece sub-word ranges within a word" {
     const json =
         \\{
         \\  "version": "1.0",
-        \\  "pre_tokenizer": {"type": "BertPreTokenizer"},
+        \\  "pre_tokenizer": {"type": "Whitespace"},
         \\  "model": {
         \\    "type": "WordPiece",
-        \\    "vocab": {"[UNK]": 0, "hello": 1, "world": 2, "!": 3},
+        \\    "vocab": {"[UNK]": 0, "un": 1, "##aff": 2, "##able": 3},
         \\    "unk_token": "[UNK]",
         \\    "continuing_subword_prefix": "##",
         \\    "max_input_chars_per_word": 100
@@ -2478,17 +2541,49 @@ test "encodeWithOffsets — WordPiece synthetic tags per-word ranges" {
     var tok = try fromJson(testing.allocator, json);
     defer tok.deinit();
 
-    const result = try tok.encodeWithOffsets(testing.allocator, "hello world!");
+    const result = try tok.encodeWithOffsets(testing.allocator, "unaffable");
     defer result.deinit(testing.allocator);
 
-    // "hello"=1 at [0,5], "world"=2 at [6,12], "!"=3 at [6,12] (punct split same chunk).
     try testing.expectEqualSlices(u32, &[_]u32{ 1, 2, 3 }, result.ids);
+    // True sub-word offsets: un=[0,2], ##aff=[2,5], ##able=[5,9].
+    try testing.expectEqual(@as(u32, 0), result.offsets[0].start);
+    try testing.expectEqual(@as(u32, 2), result.offsets[0].end);
+    try testing.expectEqual(@as(u32, 2), result.offsets[1].start);
+    try testing.expectEqual(@as(u32, 5), result.offsets[1].end);
+    try testing.expectEqual(@as(u32, 5), result.offsets[2].start);
+    try testing.expectEqual(@as(u32, 9), result.offsets[2].end);
+}
+
+test "encodeWithOffsets — multi-word with punctuation tracking" {
+    const json =
+        \\{
+        \\  "version": "1.0",
+        \\  "pre_tokenizer": {"type": "BertPreTokenizer"},
+        \\  "model": {
+        \\    "type": "WordPiece",
+        \\    "vocab": {"[UNK]": 0, "hello": 1, "world": 2, "!": 3, ",": 4},
+        \\    "unk_token": "[UNK]",
+        \\    "continuing_subword_prefix": "##",
+        \\    "max_input_chars_per_word": 100
+        \\  }
+        \\}
+    ;
+    var tok = try fromJson(testing.allocator, json);
+    defer tok.deinit();
+
+    const result = try tok.encodeWithOffsets(testing.allocator, "hello, world!");
+    defer result.deinit(testing.allocator);
+
+    try testing.expectEqualSlices(u32, &[_]u32{ 1, 4, 2, 3 }, result.ids);
+    // hello=[0,5], ,=[5,6], world=[7,12], !=[12,13]
     try testing.expectEqual(@as(u32, 0), result.offsets[0].start);
     try testing.expectEqual(@as(u32, 5), result.offsets[0].end);
-    try testing.expectEqual(@as(u32, 6), result.offsets[1].start);
-    try testing.expectEqual(@as(u32, 12), result.offsets[1].end);
-    try testing.expectEqual(@as(u32, 6), result.offsets[2].start);
+    try testing.expectEqual(@as(u32, 5), result.offsets[1].start);
+    try testing.expectEqual(@as(u32, 6), result.offsets[1].end);
+    try testing.expectEqual(@as(u32, 7), result.offsets[2].start);
     try testing.expectEqual(@as(u32, 12), result.offsets[2].end);
+    try testing.expectEqual(@as(u32, 12), result.offsets[3].start);
+    try testing.expectEqual(@as(u32, 13), result.offsets[3].end);
 }
 
 test "encodeWithOffsets — added tokens get exact match offsets" {

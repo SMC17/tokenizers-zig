@@ -1,7 +1,16 @@
 # STATUS
 
-**Version:** v0.15
+**Version:** v0.16
 **Last update:** 2026-05-22
+
+## What landed in v0.16 (on top of v0.15)
+
+- **True sub-word WordPiece offsets**. `wordpiece.Model.encodeWithOffsets`
+  emits per-piece byte ranges; `Tokenizer.encodeWithOffsets` uses them.
+  `unaffable` → `un=[0,2]`, `##aff=[2,5]`, `##able=[5,9]`.
+- NER-grade precision on BERT pipelines.
+
+167 tests pass.
 
 ## What landed in v0.15 (on top of v0.14)
 
