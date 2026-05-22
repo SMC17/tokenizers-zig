@@ -1,5 +1,40 @@
 # Changelog
 
+## 0.18.0 — 2026-05-22
+
+Sub-token offsets for Unigram+Metaspace (T5 pipeline). All three model
+families now produce sub-token byte ranges through their pre-tokenize
++ model pipeline. 176 tests pass.
+
+### unigram.encodeWithOffsets
+
+- Viterbi DP reconstructs both id sequence and byte boundaries per
+  segment. Returns parallel `ids` + `offsets: [][2]u32`.
+- Standalone tests: single-segment / multi-segment cases.
+
+### Tokenizer.encodeWithOffsets — Unigram+Metaspace path
+
+- T5-style Sequence(WhitespaceSplit, Metaspace) pipeline now produces
+  per-token offsets in the original input:
+  `normalize → whitespace-split → for each word: prepend rep → Viterbi
+  with offsets → subtract metaspace prefix length → shift to absolute
+  word position`.
+- Verified: encoding "hello world" with vocab `["▁hello", "▁world"]`
+  produces `[▁hello, ▁world]` with offsets `[0,5]`, `[6,11]`.
+
+### Sub-token offset coverage matrix
+
+| Pipeline | Sub-token offsets |
+|---|---|
+| WordPiece + BertPreTokenizer | ✓ (v0.16) |
+| BPE + ByteLevel | ✓ (v0.17) |
+| Unigram + Metaspace | ✓ (v0.18) |
+| BPE + SP marker (Llama) | chunk-level (v0.19 work) |
+
+### Test count
+
+176 tests pass.
+
 ## 0.17.0 — 2026-05-22
 
 Sub-token offsets through ByteLevel + BPE merge. 173 tests pass.

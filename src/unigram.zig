@@ -62,6 +62,104 @@ pub const Model = struct {
         self.allocator.destroy(self.arena);
     }
 
+    /// Encode + return per-token byte-offset ranges (in `text`'s byte
+    /// space). Viterbi reconstructs both the id sequence and the byte
+    /// boundaries of each segment. Caller frees both slices.
+    pub fn encodeWithOffsets(
+        self: *const Model,
+        alloc: std.mem.Allocator,
+        text: []const u8,
+    ) !struct { ids: []u32, offsets: [][2]u32 } {
+        if (text.len == 0) return .{
+            .ids = try alloc.alloc(u32, 0),
+            .offsets = try alloc.alloc([2]u32, 0),
+        };
+
+        var boundaries: std.ArrayList(usize) = .empty;
+        defer boundaries.deinit(alloc);
+        try boundaries.append(alloc, 0);
+        var i: usize = 0;
+        while (i < text.len) {
+            const n = try std.unicode.utf8ByteSequenceLength(text[i]);
+            if (i + n > text.len) return Error.InvalidUtf8;
+            i += n;
+            try boundaries.append(alloc, i);
+        }
+        const n_chars = boundaries.items.len - 1;
+
+        const NEG_INF = -std.math.inf(f64);
+        const best = try alloc.alloc(f64, n_chars + 1);
+        defer alloc.free(best);
+        const back_prev = try alloc.alloc(usize, n_chars + 1);
+        defer alloc.free(back_prev);
+        const back_id = try alloc.alloc(u32, n_chars + 1);
+        defer alloc.free(back_id);
+
+        @memset(best, NEG_INF);
+        @memset(back_prev, 0);
+        @memset(back_id, 0);
+        best[0] = 0.0;
+
+        var end_pos: usize = 1;
+        while (end_pos <= n_chars) : (end_pos += 1) {
+            const b_end = boundaries.items[end_pos];
+            var start_pos: usize = 0;
+            while (start_pos < end_pos) : (start_pos += 1) {
+                if (best[start_pos] == NEG_INF) continue;
+                const b_start = boundaries.items[start_pos];
+                const substr = text[b_start..b_end];
+                var step_score: f64 = undefined;
+                var step_id: u32 = undefined;
+                if (self.str_to_id.get(substr)) |id| {
+                    step_score = self.scores[id];
+                    step_id = id;
+                } else if (end_pos - start_pos == 1) {
+                    step_score = self.unk_score;
+                    step_id = self.unk_id;
+                } else continue;
+                const cand = best[start_pos] + step_score;
+                if (cand > best[end_pos]) {
+                    best[end_pos] = cand;
+                    back_prev[end_pos] = start_pos;
+                    back_id[end_pos] = step_id;
+                }
+            }
+        }
+
+        if (best[n_chars] == NEG_INF) {
+            const ids_out = try alloc.alloc(u32, 1);
+            ids_out[0] = self.unk_id;
+            const off_out = try alloc.alloc([2]u32, 1);
+            off_out[0] = .{ 0, @intCast(text.len) };
+            return .{ .ids = ids_out, .offsets = off_out };
+        }
+
+        // Trace back; reverse to forward order with parallel offsets.
+        var rev_ids: std.ArrayList(u32) = .empty;
+        defer rev_ids.deinit(alloc);
+        var rev_offs: std.ArrayList([2]u32) = .empty;
+        defer rev_offs.deinit(alloc);
+        var cur: usize = n_chars;
+        while (cur > 0) {
+            const j = back_prev[cur];
+            try rev_ids.append(alloc, back_id[cur]);
+            try rev_offs.append(alloc, .{
+                @intCast(boundaries.items[j]),
+                @intCast(boundaries.items[cur]),
+            });
+            cur = j;
+        }
+
+        const ids_out = try alloc.alloc(u32, rev_ids.items.len);
+        const off_out = try alloc.alloc([2]u32, rev_offs.items.len);
+        var k: usize = 0;
+        while (k < rev_ids.items.len) : (k += 1) {
+            ids_out[k] = rev_ids.items[rev_ids.items.len - 1 - k];
+            off_out[k] = rev_offs.items[rev_offs.items.len - 1 - k];
+        }
+        return .{ .ids = ids_out, .offsets = off_out };
+    }
+
     /// Encode an input string into token IDs by Viterbi-best segmentation.
     /// Caller frees the returned slice.
     pub fn encode(self: *const Model, alloc: std.mem.Allocator, text: []const u8) ![]u32 {
@@ -375,6 +473,58 @@ test "Unigram — decode concatenates token strings in order" {
     const text = try m.decode(testing.allocator, &[_]u32{ 1, 2 });
     defer testing.allocator.free(text);
     try testing.expectEqualStrings("hello", text);
+}
+
+test "Unigram encodeWithOffsets — Viterbi segments emit byte ranges" {
+    var m = try build(
+        testing.allocator,
+        &.{
+            .{ .token = "<unk>", .score = -20.0 },
+            .{ .token = "a", .score = -1.0 },
+            .{ .token = "b", .score = -1.0 },
+            .{ .token = "ab", .score = -1.5 },
+        },
+        0,
+        null,
+    );
+    defer m.deinit();
+
+    const r = try m.encodeWithOffsets(testing.allocator, "ab");
+    defer testing.allocator.free(r.ids);
+    defer testing.allocator.free(r.offsets);
+    // ab=-1.5 > a+b=-2.0; single segment [0, 2].
+    try testing.expectEqualSlices(u32, &[_]u32{3}, r.ids);
+    try testing.expectEqual(@as(u32, 0), r.offsets[0][0]);
+    try testing.expectEqual(@as(u32, 2), r.offsets[0][1]);
+}
+
+test "Unigram encodeWithOffsets — multi-segment offsets" {
+    var m = try build(
+        testing.allocator,
+        &.{
+            .{ .token = "<unk>", .score = -20.0 },
+            .{ .token = "a", .score = -1.0 },
+            .{ .token = "b", .score = -1.0 },
+            .{ .token = "c", .score = -1.0 },
+            .{ .token = "ab", .score = -3.0 },
+            .{ .token = "bc", .score = -3.0 },
+        },
+        0,
+        null,
+    );
+    defer m.deinit();
+
+    // a+b+c=-3 beats ab+c=-4 and a+bc=-4. Three segments.
+    const r = try m.encodeWithOffsets(testing.allocator, "abc");
+    defer testing.allocator.free(r.ids);
+    defer testing.allocator.free(r.offsets);
+    try testing.expectEqualSlices(u32, &[_]u32{ 1, 2, 3 }, r.ids);
+    try testing.expectEqual(@as(u32, 0), r.offsets[0][0]);
+    try testing.expectEqual(@as(u32, 1), r.offsets[0][1]);
+    try testing.expectEqual(@as(u32, 1), r.offsets[1][0]);
+    try testing.expectEqual(@as(u32, 2), r.offsets[1][1]);
+    try testing.expectEqual(@as(u32, 2), r.offsets[2][0]);
+    try testing.expectEqual(@as(u32, 3), r.offsets[2][1]);
 }
 
 test "Unigram — encode + decode round-trip on segmented word" {
