@@ -40,8 +40,9 @@ test "real TinyLlama tokenizer.json parses (32000 vocab, 61249 merges)" {
 
     // 32000 vocab + 3 added tokens — total vocab keys in BPE model
     // should be 32000. The added_tokens are separate in the JSON.
-    try std.testing.expectEqual(@as(usize, 32000), tok.model.vocab.count());
-    try std.testing.expectEqual(@as(usize, 61249), tok.model.merges.count());
+    try std.testing.expect(tok.model == .bpe);
+    try std.testing.expectEqual(@as(usize, 32000), tok.model.bpe.vocab.count());
+    try std.testing.expectEqual(@as(usize, 61249), tok.model.bpe.merges.count());
 
     // The SP space marker should have been detected via the
     // normalizer Sequence(Prepend, Replace) pattern.
