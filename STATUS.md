@@ -1,7 +1,22 @@
 # STATUS
 
-**Version:** v0.6
-**Last update:** 2026-05-21
+**Version:** v0.7
+**Last update:** 2026-05-22
+
+## What landed in v0.7 (on top of v0.6)
+
+- **Batch APIs**: `encodeBatch(texts)` and `encodeBatchPair(a, b)`
+  for HF-style batch processing.
+- **Latin Extended-A NFD/NFC round-trip** — decompose + compose
+  tables expanded from ~14 to ~96 entries. Polish, Czech, Romanian,
+  Hungarian, Turkish, Baltic Latin all round-trip cleanly.
+- **Explicit decoder Sequence parsing** — `DecoderOp` union covers
+  Replace / ByteFallback / Fuse / Strip / ByteLevel / Metaspace /
+  WordPiece. BPE decode uses the parsed sequence when present.
+  Real Llama integration test still validates the explicit path
+  produces canonical output.
+
+138 unit + integration tests pass.
 
 ## What landed in v0.6 (on top of v0.5)
 

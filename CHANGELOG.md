@@ -1,5 +1,54 @@
 # Changelog
 
+## 0.7.0 — 2026-05-22
+
+Batch encode + sentence-pair batch + Latin Extended-A round-trip
+(82 new NFD/NFC entries) + explicit decoder Sequence parsing.
+138 tests pass.
+
+### Batch API
+
+- `Tokenizer.encodeBatch(texts) → [][]u32` — independent per-text
+  encode through the full pipeline (TemplateProcessing + truncation +
+  padding).
+- `Tokenizer.encodeBatchPair(pairs_a, pairs_b) → [][]u32` — pair batch
+  for BERT NSP and similar; lengths must match.
+- `Tokenizer.freeBatch` releases both inner and outer slices.
+
+### Latin Extended-A NFD/NFC round-trip
+
+- Decompose table expanded from ~14 to ~96 entries covering most of
+  Latin Extended-A. Includes Polish (ŁłĆćŚśŹźŻż), Czech (ČčĎďĚěŇňŘřŠšŤťŽž),
+  Romanian (ĂăŞşŢţ), Hungarian (ŐőŰű), Turkish (ĞğİıŞş), Estonian /
+  Latvian / Lithuanian extras.
+- Compose table mirrors decompose for full NFD → NFC round-trip on the
+  same set. Tested with "Łódź Praha ČĎŇŘŤŽ Český" sample.
+
+### Explicit decoder Sequence parsing
+
+- New `DecoderOp` union covering Replace / ByteFallback / Fuse / Strip
+  / ByteLevel / Metaspace / WordPiece.
+- `parseDecoderSequence` walks the `decoder.decoders[]` array and
+  emits an ordered ops list.
+- BPE decode path uses the explicit ops when present; otherwise falls
+  back to the implicit pipeline (preserves v0.4-v0.6 behaviour).
+- Real Llama integration test still passes — the explicit path
+  produces byte-identical output to the implicit one.
+
+### Test count
+
+138 unit + integration tests pass.
+
+### Known non-claims for v0.7
+
+- Encode batch is sequential (one text at a time). True parallelism
+  via std.Thread is v0.8 work.
+- WordPiece + Unigram decoders use the model-internal decode and treat
+  the decoder Sequence's WordPiece step as a no-op pass-through.
+  Sufficient for canonical HF behaviour on BERT/T5.
+- NFD/NFC for Latin Extended-B (Vietnamese, broader European) is v0.8
+  table expansion.
+
 ## 0.6.0 — 2026-05-21
 
 BertNormalizer full composition (clean_text + handle_chinese_chars +
