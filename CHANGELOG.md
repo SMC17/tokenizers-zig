@@ -1,5 +1,47 @@
 # Changelog
 
+## 0.8.0 — 2026-05-22
+
+Parallel batch encode + scaling bench. 140 tests pass.
+
+### Parallel encodeBatch
+
+- `Tokenizer.encodeBatchParallel(texts, n_threads)` spawns N std.Thread
+  workers, each taking a contiguous chunk. Tokenizer state is shared
+  read-only across workers; each worker uses the caller's allocator
+  (or threadsafe wrapper) for per-text output.
+- `n_threads <= 1` falls through to sequential `encodeBatch`.
+- On worker error, all partial output is freed and the first error
+  is propagated.
+- `bench/bench_parallel_bert.zig` measures scaling at 1/2/4/8 threads
+  on 200×123-byte BERT inputs.
+
+### Bench (BERT-base, 200×123-byte texts, ReleaseFast consumer 4c/8t)
+
+| Threads | per-text | texts/sec | scaling |
+|---|---|---|---|
+| 1 | ~16μs | ~62K | 1.00x |
+| 2 | ~12μs | ~87K | 1.40x |
+| 4 | ~9μs  | ~116K | 1.87x |
+| 8 | ~11μs | ~87K  | 1.41x (HT contention) |
+
+Same 4→8 hyperthreading regression pattern as faiss-zig — real 8-core
+hardware would hold the linear curve through 8.
+
+### Test count
+
+140 tests pass.
+
+### Known non-claims for v0.8
+
+- Parallel batch shares the Tokenizer struct read-only. The internal
+  `std.StringHashMap` is safe for concurrent reads (no rehashing
+  during reads); if a future change introduces lazy mutation this
+  becomes unsafe.
+- No allocator-aware fan-out. Each worker uses the same passed
+  allocator. For high contention rates a per-thread ArenaAllocator
+  would help further (v0.9 work).
+
 ## 0.7.0 — 2026-05-22
 
 Batch encode + sentence-pair batch + Latin Extended-A round-trip
