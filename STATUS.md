@@ -1,7 +1,18 @@
 # STATUS
 
-**Version:** v0.25
+**Version:** v0.26
 **Last update:** 2026-05-22
+
+## What landed in v0.26 (on top of v0.25)
+
+- **Property-based invariant fuzzer** (`tests/test_fuzz_invariants.zig`)
+  — 200 random ASCII texts × 3 real fixtures × invariant checks.
+- **Bug found + fixed**: TinyLlama BPE+SP-marker offset remap had a
+  monotonicity violation for all-SYNTHETIC tokens (e.g. `▁▁` from
+  double-space). Now uses a running-position cursor instead of
+  `chunk_text.len` as the SYNTHETIC fallback.
+
+189 tests + 600-iter fuzz pass across all 3 fixtures.
 
 ## What landed in v0.25 (on top of v0.24)
 

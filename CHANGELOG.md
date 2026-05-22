@@ -1,5 +1,44 @@
 # Changelog
 
+## 0.26.0 — 2026-05-22
+
+Property-based invariant fuzzer caught a real BPE+SP-marker bug.
+189 tests pass + 600 random texts cross all three real fixtures clean.
+
+### tests/test_fuzz_invariants.zig
+
+For each real fixture (BERT, T5, TinyLlama), generate 200 random ASCII
+texts (letters + digits + whitespace + punctuation) and verify:
+
+1. Non-empty input → ≥1 token
+2. All offsets within [0, text.len]
+3. Offsets monotonic non-decreasing
+4. attention_mask / type_ids / offsets / tokens / special_tokens_mask
+   all parallel to ids
+5. Decode does not error
+
+`zig build test-fuzz` runs the standalone fuzzer; integrated into
+the default `zig build test` too.
+
+### Bug found by fuzz (and fixed)
+
+The TinyLlama (BPE+SP marker) offset remap used `chunk_text.len` as
+the fallback for tokens whose normalized bytes are all `SYNTHETIC`
+(e.g. the double-space `▁▁` sequence from `Replace(" "→"▁")` on
+input `"  "`). This violated monotonicity because subsequent real
+tokens then got smaller start positions.
+
+Fix: track a `running_end` cursor through the encode loop. All-
+SYNTHETIC tokens get a zero-width offset at the current running
+position. Cursor advances on each token's `end`.
+
+Caught by fuzz on text `iHuL?OXlo,kxi0nl7a  VfXytl` — two adjacent
+spaces hit the case.
+
+### Test count
+
+189 tests + 600-iter fuzz pass across all 3 real fixtures.
+
 ## 0.25.0 — 2026-05-22
 
 Full canonical HF `Encoding` struct + one-shot `encodeFull`/`encodePairFull`

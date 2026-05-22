@@ -750,11 +750,13 @@ pub const Tokenizer = struct {
             const r = try self.model.bpe.encodeWithOffsets(alloc, nrm.output);
             defer alloc.free(r.ids);
             defer alloc.free(r.offsets);
+            // running_end tracks the running input position so all-SYNTHETIC
+            // tokens get a zero-width offset at the current position rather
+            // than at chunk_text.len (which would violate monotonicity).
+            var running_end: u32 = 0;
             for (r.ids, r.offsets) |id, off| {
-                // Find first non-SYNTHETIC input position from off[0] going
-                // right; if none, fall back to chunk_text.len. Similarly
-                // walk backward from off[1]-1 for the inclusive end.
-                var s_in: u32 = @intCast(chunk_text.len);
+                var s_in: ?u32 = null;
+                var e_in: ?u32 = null;
                 var k: usize = off[0];
                 while (k < off[1] and k < nrm.input_index.len) : (k += 1) {
                     if (nrm.input_index[k] != normalizer.SYNTHETIC) {
@@ -762,7 +764,6 @@ pub const Tokenizer = struct {
                         break;
                     }
                 }
-                var e_in: u32 = s_in;
                 if (off[1] > 0) {
                     var kk: usize = off[1] - 1;
                     while (kk + 1 > off[0] and kk < nrm.input_index.len) {
@@ -774,11 +775,14 @@ pub const Tokenizer = struct {
                         kk -= 1;
                     }
                 }
+                const start_val: u32 = s_in orelse running_end;
+                const end_val: u32 = e_in orelse start_val;
                 try ids_out.append(alloc, id);
                 try off_out.append(alloc, .{
-                    .start = @as(u32, @intCast(start)) + s_in,
-                    .end = @as(u32, @intCast(start)) + e_in,
+                    .start = @as(u32, @intCast(start)) + start_val,
+                    .end = @as(u32, @intCast(start)) + end_val,
                 });
+                if (end_val > running_end) running_end = end_val;
             }
             return;
         }
