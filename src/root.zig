@@ -414,9 +414,50 @@ pub const Tokenizer = struct {
             return;
         }
 
-        // Other pipelines (BPE+SP, Unigram+Metaspace): tag every token
-        // with the whole-chunk range. Sub-token offsets through normalize
-        // / metaspace are v0.18 work.
+        // BPE + SP marker (Llama, Mistral) — no ByteLevel; normalizer
+        // does Prepend(▁) + Replace(" " → ▁). Use normalizer offset
+        // tracking to remap BPE token byte ranges back to original.
+        if (self.model == .bpe and self.sp_space_marker != null) {
+            const nrm = try normalizer.applyWithOffsets(alloc, self.normalizer, chunk_text);
+            defer alloc.free(nrm.output);
+            defer alloc.free(nrm.input_index);
+            const r = try self.model.bpe.encodeWithOffsets(alloc, nrm.output);
+            defer alloc.free(r.ids);
+            defer alloc.free(r.offsets);
+            for (r.ids, r.offsets) |id, off| {
+                // Find first non-SYNTHETIC input position from off[0] going
+                // right; if none, fall back to chunk_text.len. Similarly
+                // walk backward from off[1]-1 for the inclusive end.
+                var s_in: u32 = @intCast(chunk_text.len);
+                var k: usize = off[0];
+                while (k < off[1] and k < nrm.input_index.len) : (k += 1) {
+                    if (nrm.input_index[k] != normalizer.SYNTHETIC) {
+                        s_in = nrm.input_index[k];
+                        break;
+                    }
+                }
+                var e_in: u32 = s_in;
+                if (off[1] > 0) {
+                    var kk: usize = off[1] - 1;
+                    while (kk + 1 > off[0] and kk < nrm.input_index.len) {
+                        if (nrm.input_index[kk] != normalizer.SYNTHETIC) {
+                            e_in = nrm.input_index[kk] + 1;
+                            break;
+                        }
+                        if (kk == 0) break;
+                        kk -= 1;
+                    }
+                }
+                try ids_out.append(alloc, id);
+                try off_out.append(alloc, .{
+                    .start = @as(u32, @intCast(start)) + s_in,
+                    .end = @as(u32, @intCast(start)) + e_in,
+                });
+            }
+            return;
+        }
+
+        // Other pipelines: tag every token with the whole-chunk range.
         const before = ids_out.items.len;
         const chunk_ids = try self.encodeChunk(alloc, chunk_text);
         defer alloc.free(chunk_ids);
@@ -2599,6 +2640,38 @@ test "encodeBatchParallel — produces same output as encodeBatch (4 threads)" {
 
     try testing.expectEqual(seq.len, par.len);
     for (seq, par) |s, p| try testing.expectEqualSlices(u32, s, p);
+}
+
+test "encodeWithOffsets — BPE+SP marker (Llama-style) sub-token offsets" {
+    const json =
+        \\{
+        \\  "version": "1.0",
+        \\  "normalizer": {
+        \\    "type": "Sequence",
+        \\    "normalizers": [
+        \\      {"type": "Prepend", "prepend": "▁"},
+        \\      {"type": "Replace", "pattern": {"String": " "}, "content": "▁"}
+        \\    ]
+        \\  },
+        \\  "model": {
+        \\    "type": "BPE",
+        \\    "vocab": {"▁": 0, "h": 1, "i": 2, "▁hi": 3},
+        \\    "merges": ["▁ h", "▁h i"]
+        \\  }
+        \\}
+    ;
+    var tok = try fromJson(testing.allocator, json);
+    defer tok.deinit();
+
+    const r = try tok.encodeWithOffsets(testing.allocator, "hi");
+    defer r.deinit(testing.allocator);
+    // Normalized: "▁hi". BPE merges ▁+h → ▁h, then ▁h+i → ▁hi → [3].
+    // Offset for ▁hi token: bytes [0,5) in normalized → input bytes
+    // are SYNTHETIC for ▁ (0,1,2), then 0 for h, 1 for i. First
+    // non-SYNTHETIC = 0, last = 1+1 = 2.
+    try testing.expectEqualSlices(u32, &[_]u32{3}, r.ids);
+    try testing.expectEqual(@as(u32, 0), r.offsets[0].start);
+    try testing.expectEqual(@as(u32, 2), r.offsets[0].end);
 }
 
 test "encodeWithOffsets — Unigram+Metaspace sub-token offsets" {
