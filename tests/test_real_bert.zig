@@ -179,6 +179,34 @@ test "real BERT-base-uncased — encodePairWithTypes produces canonical type_ids
     try std.testing.expectEqualSlices(u8, &[_]u8{ 0, 0, 0, 1, 1 }, result.type_ids);
 }
 
+test "real BERT-base-uncased — encodePairWithOffsets tags A/B with offsets" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    try skipIfMissing(io);
+
+    var tok = try loadTokenizer(alloc, io);
+    defer tok.deinit();
+
+    const r = try tok.encodePairWithOffsets(alloc, "hello", "world");
+    defer r.deinit(alloc);
+
+    // BERT pair template: [CLS] A [SEP] B [SEP]
+    // ids = [101, 7592, 102, 2088, 102]
+    try std.testing.expectEqualSlices(u32, &[_]u32{ 101, 7592, 102, 2088, 102 }, r.ids);
+    // sequence_ids = [0, 0, 0, 1, 1]
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0, 0, 0, 1, 1 }, r.sequence_ids);
+    // offsets:
+    //   [CLS] → (0, 0) synthetic
+    //   hello → A side, bytes [0, 5)
+    //   [SEP] → (0, 0) synthetic
+    //   world → B side, bytes [0, 5)
+    //   [SEP] → (0, 0) synthetic
+    try std.testing.expectEqual(@as(u32, 0), r.offsets[1].start);
+    try std.testing.expectEqual(@as(u32, 5), r.offsets[1].end);
+    try std.testing.expectEqual(@as(u32, 0), r.offsets[3].start);
+    try std.testing.expectEqual(@as(u32, 5), r.offsets[3].end);
+}
+
 test "real BERT-base-uncased — encodeWithOffsets gives sub-token byte ranges" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
