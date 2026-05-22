@@ -1,5 +1,40 @@
 # Changelog
 
+## 0.14.0 — 2026-05-22
+
+`tokenize` CLI promoted to a real tool with six subcommands. 163 tests
+pass.
+
+### CLI subcommands
+
+- `tokenize encode      <tokenizer.json> "<text>"`         — full pipeline encode
+- `tokenize encode-base <tokenizer.json> "<text>"`         — raw model output (skip TemplateProcessing)
+- `tokenize encode-pair <tokenizer.json> "<a>" "<b>"`      — BERT NSP-style pair encode with type_ids
+- `tokenize encode-full <tokenizer.json> "<text>"`         — ids + type_ids + attention_mask
+- `tokenize decode      <tokenizer.json> "<ids,csv>"`      — decode IDs → text
+- `tokenize info        <tokenizer.json>`                  — model type, vocab size, pipeline config
+
+Verified on the three real fixtures:
+
+```
+$ zig build tokenize -- info tests/fixtures/bert-base-uncased-tokenizer.json
+model:              WordPiece
+vocab_size:         30522
+added_tokens:       5
+whitespace_split:   true
+punct_split:        true
+template_pair:      true
+
+$ zig build tokenize -- encode-pair tests/fixtures/bert-base-uncased-tokenizer.json "hello" "world"
+ids       [101, 7592, 102, 2088, 102]
+type_ids  [0, 0, 0, 1, 1]
+mask      [1, 1, 1, 1, 1]
+```
+
+### Test count
+
+163 tests pass.
+
 ## 0.13.0 — 2026-05-22
 
 Batch-with-types APIs for consistency with the EncodeResult surface.

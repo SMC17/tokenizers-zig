@@ -1,7 +1,16 @@
 # STATUS
 
-**Version:** v0.13
+**Version:** v0.14
 **Last update:** 2026-05-22
+
+## What landed in v0.14 (on top of v0.13)
+
+- **`tokenize` CLI** with six subcommands: encode / encode-base /
+  encode-pair / encode-full / decode / info.
+- All subcommands exercise the public API end-to-end.
+- Verified on real BERT / T5 / Llama fixtures.
+
+163 tests pass.
 
 ## What landed in v0.13 (on top of v0.12)
 
