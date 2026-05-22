@@ -107,19 +107,25 @@ pub fn build(b: *std.Build) void {
     const bench_step = b.step("bench", "Encode throughput bench");
     bench_step.dependOn(&run_bench.step);
 
-    // Real-tokenizer bench (Zig side of Zig-vs-Rust head-to-head)
-    const bench_real_mod = b.createModule(.{
-        .root_source_file = b.path("bench/bench_real_tinyllama.zig"),
-        .target = target,
-        .optimize = .ReleaseFast,
-    });
-    bench_real_mod.addImport("tokenizers", mod);
-    const bench_real_exe = b.addExecutable(.{
-        .name = "bench-real-tinyllama",
-        .root_module = bench_real_mod,
-    });
-    const run_bench_real = b.addRunArtifact(bench_real_exe);
-    run_bench_real.has_side_effects = true;
-    const bench_real_step = b.step("bench-real-tinyllama", "Bench real TinyLlama encode");
-    bench_real_step.dependOn(&run_bench_real.step);
+    // Real-tokenizer benches (Zig side of Zig-vs-Rust head-to-head)
+    inline for (.{
+        .{ "bench/bench_real_tinyllama.zig", "bench-real-tinyllama", "Bench real TinyLlama encode" },
+        .{ "bench/bench_real_bert.zig", "bench-real-bert", "Bench real BERT-base-uncased encode" },
+        .{ "bench/bench_real_t5.zig", "bench-real-t5", "Bench real T5-base encode" },
+    }) |bench_spec| {
+        const bm = b.createModule(.{
+            .root_source_file = b.path(bench_spec[0]),
+            .target = target,
+            .optimize = .ReleaseFast,
+        });
+        bm.addImport("tokenizers", mod);
+        const be = b.addExecutable(.{
+            .name = bench_spec[1],
+            .root_module = bm,
+        });
+        const re = b.addRunArtifact(be);
+        re.has_side_effects = true;
+        const bs = b.step(bench_spec[1], bench_spec[2]);
+        bs.dependOn(&re.step);
+    }
 }

@@ -44,6 +44,10 @@ pub const NormalizerKind = union(enum) {
     nfd: void,
     nfkc: void,
     nfkd: void,
+    /// Strip combining-mark codepoints (U+0300–U+036F range; Combining
+    /// Diacritical Marks block). Typically used after NFD to remove
+    /// diacritics, matching BertNormalizer.strip_accents semantics.
+    strip_accents: void,
 };
 
 /// Apply a normalizer to UTF-8 input. Caller frees output.
@@ -76,7 +80,37 @@ pub fn apply(alloc: std.mem.Allocator, norm: NormalizerKind, input: []const u8) 
         .nfd => return unicode_norm.nfd(alloc, input),
         .nfkc => return unicode_norm.nfkc(alloc, input),
         .nfkd => return unicode_norm.nfkd(alloc, input),
+        .strip_accents => return stripAccents(alloc, input),
     };
+}
+
+/// Strip Combining Diacritical Marks (U+0300–U+036F). All other code-
+/// points pass through unchanged. Typically applied after NFD so e.g.
+/// "é" → "e" + ◌́ → "e".
+fn stripAccents(alloc: std.mem.Allocator, input: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(alloc);
+    var i: usize = 0;
+    while (i < input.len) {
+        const n = std.unicode.utf8ByteSequenceLength(input[i]) catch {
+            try out.append(alloc, input[i]);
+            i += 1;
+            continue;
+        };
+        if (i + n > input.len) return Error.InvalidUtf8;
+        const cp = std.unicode.utf8Decode(input[i..][0..n]) catch {
+            try out.appendSlice(alloc, input[i..][0..n]);
+            i += n;
+            continue;
+        };
+        if (cp >= 0x0300 and cp <= 0x036F) {
+            // Skip combining mark
+        } else {
+            try out.appendSlice(alloc, input[i..][0..n]);
+        }
+        i += n;
+    }
+    return out.toOwnedSlice(alloc);
 }
 
 fn replaceAll(alloc: std.mem.Allocator, input: []const u8, pattern: []const u8, content: []const u8) ![]u8 {
