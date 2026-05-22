@@ -1,7 +1,22 @@
 # STATUS
 
-**Version:** v0.1
+**Version:** v0.2
 **Last update:** 2026-05-21
+
+## What landed in v0.2 (on top of v0.1)
+
+- `src/bpe.zig`: replaced O(n²) greedy merge loop with O(n log n)
+  priority-queue + doubly-linked-list implementation (`bpeEncodePQ`)
+- Stale-entry detection via three layers:
+  1. "Dead node" sentinel (`prev = -2`) on right-merged-away nodes
+  2. Piece-identity snapshot on the left
+  3. Rank re-lookup at pop time (catches downstream-merged neighbors)
+- Encoding output byte-for-byte identical to v0.1 (verified: 33 tokens
+  for the 123-byte test text, same as HF Rust reference)
+- **Measured speedup: ~10x over v0.1** on the real TinyLlama bench:
+  - v0.1 (O(n²) greedy):  491 μs/encode
+  - v0.2 (O(n log n) PQ):  ~56 μs/encode (median of 5+ runs)
+- **Gap to HF Rust closed from ~9x to ~1.2x** (Rust median ~46 μs)
 
 ## What landed in v0.1 (on top of v0.0.1)
 

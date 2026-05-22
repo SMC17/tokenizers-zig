@@ -50,73 +50,12 @@ pub const Model = struct {
     /// assumed to be a single "word" (no whitespace splitting here;
     /// the caller is responsible for pre-tokenization).
     /// Returns owned slice; caller frees.
+    ///
+    /// v0.2 algorithm: priority-queue + doubly-linked list, O(n log n)
+    /// per word. See bpeEncodePQ below for the heap-based merge loop.
     pub fn encode(self: *const Model, alloc: std.mem.Allocator, word: []const u8) ![]u32 {
         if (word.len == 0) return alloc.alloc(u32, 0);
-
-        // Step 1: split into ByteLevel "characters" — each is one UTF-8
-        // codepoint. We track byte ranges into `word` so we can slice
-        // adjacent pairs without allocating.
-        var pieces: std.ArrayList([]const u8) = .empty;
-        defer pieces.deinit(alloc);
-
-        var i: usize = 0;
-        while (i < word.len) {
-            const n = try std.unicode.utf8ByteSequenceLength(word[i]);
-            if (i + n > word.len) return error.InvalidUtf8;
-            try pieces.append(alloc, word[i .. i + n]);
-            i += n;
-        }
-
-        // Step 2: greedy lowest-rank merge.
-        var merge_key_buf: std.ArrayList(u8) = .empty;
-        defer merge_key_buf.deinit(alloc);
-
-        while (pieces.items.len > 1) {
-            var best_rank: ?u32 = null;
-            var best_idx: usize = 0;
-
-            var k: usize = 0;
-            while (k + 1 < pieces.items.len) : (k += 1) {
-                merge_key_buf.clearRetainingCapacity();
-                try merge_key_buf.appendSlice(alloc, pieces.items[k]);
-                try merge_key_buf.append(alloc, ' ');
-                try merge_key_buf.appendSlice(alloc, pieces.items[k + 1]);
-
-                if (self.merges.get(merge_key_buf.items)) |rank| {
-                    if (best_rank == null or rank < best_rank.?) {
-                        best_rank = rank;
-                        best_idx = k;
-                    }
-                }
-            }
-
-            if (best_rank == null) break;
-
-            // Merge pieces[best_idx] and pieces[best_idx+1] into
-            // pieces[best_idx]. We need a new string covering both,
-            // allocated in the arena.
-            const a = pieces.items[best_idx];
-            const b = pieces.items[best_idx + 1];
-            const merged = try self.arena.allocator().alloc(u8, a.len + b.len);
-            @memcpy(merged[0..a.len], a);
-            @memcpy(merged[a.len..], b);
-            pieces.items[best_idx] = merged;
-            _ = pieces.orderedRemove(best_idx + 1);
-        }
-
-        // Step 3: vocab lookup.
-        var out: std.ArrayList(u32) = .empty;
-        errdefer out.deinit(alloc);
-        for (pieces.items) |p| {
-            if (self.vocab.get(p)) |id| {
-                try out.append(alloc, id);
-            } else if (self.unk_token) |unk| {
-                try out.append(alloc, unk);
-            } else {
-                return Error.UnknownToken;
-            }
-        }
-        return out.toOwnedSlice(alloc);
+        return bpeEncodePQ(self, alloc, word);
     }
 
     /// Decode a sequence of token IDs back to a ByteLevel-encoded string.
@@ -145,6 +84,185 @@ pub const Model = struct {
         return out.toOwnedSlice(alloc);
     }
 };
+
+// ============================================================================
+// Priority-queue BPE encode (v0.2).
+//
+// The v0.1 O(n²) loop scanned all adjacent pairs each iteration. The
+// v0.2 algorithm maintains a doubly-linked list of pieces plus a
+// min-heap of (rank, left_node_index) candidates:
+//
+//   1. Split input into ByteLevel codepoint slices, link them into a DLL
+//   2. For each adjacent pair, look up the merge rank; if mergeable,
+//      push (rank, left_node_idx, snapshot_of_left_piece) onto heap
+//   3. Pop best candidate. Skip if:
+//        a) The node has been merged away (next pointer invalid)
+//        b) The node's current piece doesn't match the snapshot
+//           (already absorbed into a later merge)
+//   4. Otherwise: combine left.piece + right.piece into a fresh arena
+//      slice. Unlink right from DLL. Re-check new adjacencies (left's
+//      prev with left, left with left's new next) and push fresh
+//      candidates.
+//   5. Walk the DLL → output token IDs via vocab lookup.
+//
+// Stale-entry detection via piece-snapshot is the canonical HF
+// huggingface/tokenizers approach. We avoid the version-counter scheme
+// because piece contents are immutable arena slices and pointer
+// comparison is O(1).
+// ============================================================================
+
+const Node = struct {
+    piece: []const u8,
+    prev: i32, // -1 = head
+    next: i32, // -1 = tail
+};
+
+const HeapEntry = struct {
+    rank: u32,
+    left_idx: u32,
+    left_piece_ptr: [*]const u8, // identity snapshot
+    left_piece_len: u32,
+};
+
+fn heapLess(_: void, a: HeapEntry, b: HeapEntry) std.math.Order {
+    if (a.rank != b.rank) return std.math.order(a.rank, b.rank);
+    // Tie-break by left_idx for determinism
+    return std.math.order(a.left_idx, b.left_idx);
+}
+
+fn bpeEncodePQ(self: *const Model, alloc: std.mem.Allocator, word: []const u8) ![]u32 {
+    // Step 1: tokenize input into per-codepoint slices, build DLL.
+    var nodes: std.ArrayList(Node) = .empty;
+    defer nodes.deinit(alloc);
+
+    var i: usize = 0;
+    while (i < word.len) {
+        const n = try std.unicode.utf8ByteSequenceLength(word[i]);
+        if (i + n > word.len) return error.InvalidUtf8;
+        const node_idx: i32 = @intCast(nodes.items.len);
+        try nodes.append(alloc, .{
+            .piece = word[i .. i + n],
+            .prev = node_idx - 1,
+            .next = node_idx + 1, // patched below
+        });
+        i += n;
+    }
+    if (nodes.items.len == 0) return alloc.alloc(u32, 0);
+    nodes.items[nodes.items.len - 1].next = -1;
+
+    // Step 2: initial heap population.
+    var heap: std.PriorityQueue(HeapEntry, void, heapLess) = .empty;
+    defer heap.deinit(alloc);
+
+    // Helper: try to push a merge candidate for (left_idx, left.next).
+    var key_buf: std.ArrayList(u8) = .empty;
+    defer key_buf.deinit(alloc);
+
+    const tryPushMerge = struct {
+        fn run(
+            allocator: std.mem.Allocator,
+            ns: []Node,
+            h: *std.PriorityQueue(HeapEntry, void, heapLess),
+            merges: *const std.StringHashMap(u32),
+            kb: *std.ArrayList(u8),
+            left_idx: i32,
+        ) !void {
+            if (left_idx < 0) return;
+            const left = ns[@intCast(left_idx)];
+            if (left.next < 0) return;
+            const right = ns[@intCast(left.next)];
+            kb.clearRetainingCapacity();
+            try kb.appendSlice(allocator, left.piece);
+            try kb.append(allocator, ' ');
+            try kb.appendSlice(allocator, right.piece);
+            if (merges.get(kb.items)) |rank| {
+                try h.push(allocator, .{
+                    .rank = rank,
+                    .left_idx = @intCast(left_idx),
+                    .left_piece_ptr = left.piece.ptr,
+                    .left_piece_len = @intCast(left.piece.len),
+                });
+            }
+        }
+    }.run;
+
+    var k: usize = 0;
+    while (k < nodes.items.len) : (k += 1) {
+        try tryPushMerge(alloc, nodes.items, &heap, &self.merges, &key_buf, @intCast(k));
+    }
+
+    // Step 3: process heap.
+    while (heap.pop()) |entry| {
+        const left_idx_usize: usize = @intCast(entry.left_idx);
+        const left = &nodes.items[left_idx_usize];
+
+        // Stale check (dead node): a node absorbed as a "right" in a
+        // previous merge gets its prev set to -2 sentinel. Skip if dead.
+        if (left.prev == -2) continue;
+
+        // Stale check (left side): identity snapshot must match.
+        if (left.piece.ptr != entry.left_piece_ptr or
+            left.piece.len != entry.left_piece_len) continue;
+        if (left.next < 0) continue;
+
+        const right_idx_usize: usize = @intCast(left.next);
+        const right = &nodes.items[right_idx_usize];
+
+        // Stale check (right side): verify the merge "left.piece
+        // SPACE right.piece" still has the same rank. If the right
+        // neighbor was absorbed into a downstream merge, the key
+        // changes and either resolves to a different rank or no rank.
+        key_buf.clearRetainingCapacity();
+        try key_buf.appendSlice(alloc, left.piece);
+        try key_buf.append(alloc, ' ');
+        try key_buf.appendSlice(alloc, right.piece);
+        const current_rank = self.merges.get(key_buf.items) orelse continue;
+        if (current_rank != entry.rank) continue;
+
+        // Merge: allocate combined piece in arena, splice DLL.
+        const aa = self.arena.allocator();
+        const merged = try aa.alloc(u8, left.piece.len + right.piece.len);
+        @memcpy(merged[0 .. left.piece.len], left.piece);
+        @memcpy(merged[left.piece.len ..], right.piece);
+        left.piece = merged;
+        left.next = right.next;
+        if (right.next >= 0) {
+            nodes.items[@intCast(right.next)].prev = @intCast(entry.left_idx);
+        }
+        // Mark right as dead so any pending heap entries pointing at it
+        // are detected and skipped by the dead-node check above.
+        right.prev = -2;
+        right.next = -2;
+
+        // Re-check new adjacencies
+        try tryPushMerge(alloc, nodes.items, &heap, &self.merges, &key_buf, left.prev);
+        try tryPushMerge(alloc, nodes.items, &heap, &self.merges, &key_buf, @intCast(entry.left_idx));
+    }
+
+    // Step 4: walk DLL → token IDs.
+    var out: std.ArrayList(u32) = .empty;
+    errdefer out.deinit(alloc);
+
+    // Find head
+    var cur_idx: i32 = 0;
+    while (cur_idx >= 0 and nodes.items[@intCast(cur_idx)].prev >= 0) {
+        cur_idx = nodes.items[@intCast(cur_idx)].prev;
+    }
+    // Walk forward
+    while (cur_idx >= 0) {
+        const node = nodes.items[@intCast(cur_idx)];
+        if (self.vocab.get(node.piece)) |id| {
+            try out.append(alloc, id);
+        } else if (self.unk_token) |unk| {
+            try out.append(alloc, unk);
+        } else {
+            return Error.UnknownToken;
+        }
+        cur_idx = node.next;
+    }
+
+    return out.toOwnedSlice(alloc);
+}
 
 /// Build a Model from a vocab + merges list. Both are copied into an
 /// internal arena; caller's slices may be freed after init returns.
