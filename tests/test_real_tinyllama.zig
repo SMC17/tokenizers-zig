@@ -50,7 +50,7 @@ test "real TinyLlama tokenizer.json parses (32000 vocab, 61249 merges)" {
     try std.testing.expectEqualStrings("\xE2\x96\x81", tok.sp_space_marker.?);
 }
 
-test "real TinyLlama — encode 'Hello, how are you today?' produces known IDs" {
+test "real TinyLlama — encodeBase 'Hello, how are you today?' produces known base IDs" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
 
@@ -63,16 +63,35 @@ test "real TinyLlama — encode 'Hello, how are you today?' produces known IDs" 
     var tok = try loadTokenizer(alloc, io);
     defer tok.deinit();
 
-    const ids = try tok.encode(alloc, "Hello, how are you today?");
-    defer alloc.free(ids);
-
-    // Reference: Llama-2 / TinyLlama tokenization of this exact text
+    // Bare BPE (no TemplateProcessing wrap):
     //   15043=Hello, 29892=",", 920=how, 526=are, 366=you, 9826=today, 29973="?"
+    const ids = try tok.encodeBase(alloc, "Hello, how are you today?");
+    defer alloc.free(ids);
     const expected = [_]u32{ 15043, 29892, 920, 526, 366, 9826, 29973 };
     try std.testing.expectEqualSlices(u32, &expected, ids);
 }
 
-test "real TinyLlama — encode + decode round-trip preserves text" {
+test "real TinyLlama — encode prepends BOS via TemplateProcessing" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    var f = std.Io.Dir.cwd().openFile(io, fixture_path, .{ .mode = .read_only }) catch |err| switch (err) {
+        error.FileNotFound => return error.SkipZigTest,
+        else => return err,
+    };
+    f.close(io);
+
+    var tok = try loadTokenizer(alloc, io);
+    defer tok.deinit();
+
+    // TinyLlama TemplateProcessing prepends <s>=1 (BOS) before the sequence.
+    const ids = try tok.encode(alloc, "Hello, how are you today?");
+    defer alloc.free(ids);
+    const expected = [_]u32{ 1, 15043, 29892, 920, 526, 366, 9826, 29973 };
+    try std.testing.expectEqualSlices(u32, &expected, ids);
+}
+
+test "real TinyLlama — encodeBase + decode round-trip preserves text" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
 
@@ -91,7 +110,7 @@ test "real TinyLlama — encode + decode round-trip preserves text" {
         "Tokenization is a strange and beautiful art.",
     };
     for (samples) |s| {
-        const ids = try tok.encode(alloc, s);
+        const ids = try tok.encodeBase(alloc, s);
         defer alloc.free(ids);
         const back = try tok.decode(alloc, ids);
         defer alloc.free(back);

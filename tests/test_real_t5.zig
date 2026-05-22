@@ -52,7 +52,7 @@ test "real t5-base — parses with 32100 vocab, Unigram + Metaspace" {
     try std.testing.expectEqual(@as(usize, 103), tok.added_tokens.len);
 }
 
-test "real t5-base — added tokens emit their canonical IDs" {
+test "real t5-base — encodeBase emits added tokens at their canonical IDs" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
     try skipIfMissing(io);
@@ -60,7 +60,6 @@ test "real t5-base — added tokens emit their canonical IDs" {
     var tok = try loadTokenizer(alloc, io);
     defer tok.deinit();
 
-    // Canonical T5-base added_token IDs from the t5-base tokenizer.json.
     const cases = [_]struct { content: []const u8, id: u32 }{
         .{ .content = "<pad>", .id = 0 },
         .{ .content = "</s>", .id = 1 },
@@ -69,13 +68,13 @@ test "real t5-base — added tokens emit their canonical IDs" {
         .{ .content = "<extra_id_99>", .id = 32000 },
     };
     for (cases) |c| {
-        const ids = try tok.encode(alloc, c.content);
+        const ids = try tok.encodeBase(alloc, c.content);
         defer alloc.free(ids);
         try std.testing.expectEqualSlices(u32, &[_]u32{c.id}, ids);
     }
 }
 
-test "real t5-base — encodes 'hello' as canonical ▁hello (id 21820)" {
+test "real t5-base — encode 'hello' produces [▁hello, </s>] via TemplateProcessing" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
     try skipIfMissing(io);
@@ -83,28 +82,13 @@ test "real t5-base — encodes 'hello' as canonical ▁hello (id 21820)" {
     var tok = try loadTokenizer(alloc, io);
     defer tok.deinit();
 
-    // Metaspace prepends ▁; Unigram finds ▁hello as a single piece (id 21820).
+    // T5's TemplateProcessing appends </s>=1 after the sequence.
     const ids = try tok.encode(alloc, "hello");
-    defer alloc.free(ids);
-    try std.testing.expectEqualSlices(u32, &[_]u32{21820}, ids);
-}
-
-test "real t5-base — encodes 'hello </s>' as [▁hello, </s>]" {
-    const alloc = std.testing.allocator;
-    const io = std.testing.io;
-    try skipIfMissing(io);
-
-    var tok = try loadTokenizer(alloc, io);
-    defer tok.deinit();
-
-    // </s> matches as added_token (id 1); "hello " chunk goes through
-    // Unigram → ▁hello (21820).
-    const ids = try tok.encode(alloc, "hello </s>");
     defer alloc.free(ids);
     try std.testing.expectEqualSlices(u32, &[_]u32{ 21820, 1 }, ids);
 }
 
-test "real t5-base — encode + decode round-trip on lowercased text" {
+test "real t5-base — encodeBase 'hello' produces bare [▁hello]" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
     try skipIfMissing(io);
@@ -112,11 +96,37 @@ test "real t5-base — encode + decode round-trip on lowercased text" {
     var tok = try loadTokenizer(alloc, io);
     defer tok.deinit();
 
-    // After encode + decode the Metaspace ▁-prefix is reversed back to
-    // space (leading-space stripped per decoder convention).
+    const ids = try tok.encodeBase(alloc, "hello");
+    defer alloc.free(ids);
+    try std.testing.expectEqualSlices(u32, &[_]u32{21820}, ids);
+}
+
+test "real t5-base — encode 'hello </s>' produces [▁hello, </s>, </s>]" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    try skipIfMissing(io);
+
+    var tok = try loadTokenizer(alloc, io);
+    defer tok.deinit();
+
+    // Base: [▁hello, </s>] (literal </s> matched as added_token).
+    // TemplateProcessing appends </s>=1 after the sequence.
+    const ids = try tok.encode(alloc, "hello </s>");
+    defer alloc.free(ids);
+    try std.testing.expectEqualSlices(u32, &[_]u32{ 21820, 1, 1 }, ids);
+}
+
+test "real t5-base — encode + decode round-trip emits text with appended </s>" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    try skipIfMissing(io);
+
+    var tok = try loadTokenizer(alloc, io);
+    defer tok.deinit();
+
     const ids = try tok.encode(alloc, "hello");
     defer alloc.free(ids);
     const back = try tok.decode(alloc, ids);
     defer alloc.free(back);
-    try std.testing.expectEqualStrings("hello", back);
+    try std.testing.expectEqualStrings("hello</s>", back);
 }

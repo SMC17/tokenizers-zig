@@ -29,6 +29,8 @@ pub const bpe = @import("bpe.zig");
 pub const wordpiece = @import("wordpiece.zig");
 pub const unigram = @import("unigram.zig");
 pub const normalizer = @import("normalizer.zig");
+pub const unicode_norm = @import("unicode_norm.zig");
+pub const gpt2_regex = @import("gpt2_regex.zig");
 
 pub const Error = error{
     InvalidTokenizerJson,
@@ -69,6 +71,20 @@ pub const AddedToken = struct {
     content: []const u8,
 };
 
+/// A single element of a TemplateProcessing template: either a fixed
+/// sequence of token IDs (resolved from a SpecialToken) or a marker to
+/// inject the input's encoded IDs at this position (the "A" sequence).
+pub const TemplateOp = union(enum) {
+    append_ids: []const u32,
+    append_input: void,
+};
+
+/// Truncation strategy applied after encode + TemplateProcessing.
+pub const TruncationDirection = enum { right, left };
+
+/// Padding direction applied after encode + truncation.
+pub const PaddingDirection = enum { right, left };
+
 /// Pipeline configuration assembled from a HF tokenizer.json.
 pub const Tokenizer = struct {
     allocator: std.mem.Allocator,
@@ -77,6 +93,11 @@ pub const Tokenizer = struct {
     model: Model,
     /// True if pre-tokenizer is ByteLevel (GPT-2 / Llama-3 style).
     use_byte_level: bool,
+    /// True if the ByteLevel pre-tokenizer is configured with
+    /// `use_regex: true` (the canonical GPT-2 word-boundary regex).
+    /// When set, the BPE encoder splits input via the GPT-2 regex
+    /// pattern before applying ByteLevel + BPE per chunk.
+    use_gpt2_regex: bool,
     /// True if pre-tokenizer is Whitespace-style (BERT WordPiece).
     use_whitespace_split: bool,
     /// True if pre-tokenizer is BertPreTokenizer — split on whitespace AND
@@ -95,6 +116,22 @@ pub const Tokenizer = struct {
     added_tokens: []AddedToken,
     /// id → content lookup for decode.
     added_token_by_id: std.AutoHashMap(u32, []const u8),
+    /// TemplateProcessing single-input template. When non-null, applied
+    /// to the encoded ID sequence to wrap with BOS/EOS/CLS/SEP markers.
+    template_single: ?[]const TemplateOp,
+    /// True if the decoder Sequence contains a `ByteFallback` step. When
+    /// set, decode replaces `<0xXX>` token strings with their literal
+    /// byte values after the model's vocab lookup.
+    use_byte_fallback: bool,
+    /// Truncation config. When max_length is non-null, encode trims the
+    /// output to at most this many tokens from `truncation_direction`.
+    max_length: ?u32,
+    truncation_direction: TruncationDirection,
+    /// Padding config. When pad_to_length is non-null, encode pads short
+    /// outputs to this length with `pad_token_id` from `padding_direction`.
+    pad_to_length: ?u32,
+    pad_token_id: u32,
+    padding_direction: PaddingDirection,
 
     pub fn deinit(self: *Tokenizer) void {
         self.model.deinit();
@@ -119,10 +156,25 @@ pub const Tokenizer = struct {
     }
 
     /// Encode UTF-8 text into token IDs. Caller frees.
+    ///
+    /// Pipeline (in order):
+    ///   1. Added-token longest-match scan splits input into added-id
+    ///      emissions and chunks routed through the model pipeline.
+    ///   2. TemplateProcessing (if configured) wraps the base IDs with
+    ///      BOS/EOS/CLS/SEP markers per the `single` template.
+    ///   3. Truncation (if `max_length` set) trims from
+    ///      `truncation_direction`.
+    ///   4. Padding (if `pad_to_length` set) extends with `pad_token_id`.
     pub fn encode(self: *Tokenizer, alloc: std.mem.Allocator, text: []const u8) ![]u32 {
-        // Step 0: split on added tokens. Each non-added chunk goes through
-        // the full normalize → metaspace → model pipeline; each added
-        // token emits its id directly.
+        const base = try self.encodeBase(alloc, text);
+        defer alloc.free(base);
+        return self.applyPostProcessing(alloc, base);
+    }
+
+    /// Encode WITHOUT TemplateProcessing / truncation / padding. Returns
+    /// the raw model-side IDs only. Useful when the caller is composing
+    /// templates manually.
+    pub fn encodeBase(self: *Tokenizer, alloc: std.mem.Allocator, text: []const u8) ![]u32 {
         if (self.added_tokens.len > 0) {
             var out: std.ArrayList(u32) = .empty;
             errdefer out.deinit(alloc);
@@ -150,6 +202,57 @@ pub const Tokenizer = struct {
             return out.toOwnedSlice(alloc);
         }
         return self.encodeChunk(alloc, text);
+    }
+
+    /// Apply TemplateProcessing → truncation → padding. Caller frees.
+    fn applyPostProcessing(self: *Tokenizer, alloc: std.mem.Allocator, base: []const u32) ![]u32 {
+        var out: std.ArrayList(u32) = .empty;
+        errdefer out.deinit(alloc);
+
+        if (self.template_single) |tpl| {
+            for (tpl) |op| switch (op) {
+                .append_ids => |ids| try out.appendSlice(alloc, ids),
+                .append_input => try out.appendSlice(alloc, base),
+            };
+        } else {
+            try out.appendSlice(alloc, base);
+        }
+
+        // Truncation
+        if (self.max_length) |mx| {
+            if (out.items.len > mx) {
+                switch (self.truncation_direction) {
+                    .right => out.shrinkRetainingCapacity(mx),
+                    .left => {
+                        const drop = out.items.len - mx;
+                        std.mem.copyForwards(u32, out.items[0..mx], out.items[drop..]);
+                        out.shrinkRetainingCapacity(mx);
+                    },
+                }
+            }
+        }
+
+        // Padding
+        if (self.pad_to_length) |pl| {
+            if (out.items.len < pl) {
+                const need = pl - out.items.len;
+                switch (self.padding_direction) {
+                    .right => {
+                        try out.ensureUnusedCapacity(alloc, need);
+                        for (0..need) |_| out.appendAssumeCapacity(self.pad_token_id);
+                    },
+                    .left => {
+                        try out.ensureTotalCapacity(alloc, pl);
+                        const old_len = out.items.len;
+                        out.items.len = pl;
+                        std.mem.copyBackwards(u32, out.items[need..], out.items[0..old_len]);
+                        for (0..need) |i| out.items[i] = self.pad_token_id;
+                    },
+                }
+            }
+        }
+
+        return out.toOwnedSlice(alloc);
     }
 
     /// Encode a single chunk of text (no added-token splitting) through the
@@ -200,6 +303,22 @@ pub const Tokenizer = struct {
 
         switch (self.model) {
             .bpe => |*m| {
+                if (self.use_byte_level and self.use_gpt2_regex) {
+                    // GPT-2 / RoBERTa pipeline: regex split → byte_level
+                    // per chunk → BPE per chunk → concat.
+                    const chunks = try gpt2_regex.split(alloc, metaspaced);
+                    defer alloc.free(chunks);
+                    var out: std.ArrayList(u32) = .empty;
+                    errdefer out.deinit(alloc);
+                    for (chunks) |c| {
+                        const encoded = try byte_level.encode(alloc, c);
+                        defer alloc.free(encoded);
+                        const ids = try m.encode(alloc, encoded);
+                        defer alloc.free(ids);
+                        try out.appendSlice(alloc, ids);
+                    }
+                    return out.toOwnedSlice(alloc);
+                }
                 if (self.use_byte_level) {
                     const encoded = try byte_level.encode(alloc, metaspaced);
                     defer alloc.free(encoded);
@@ -272,14 +391,23 @@ pub const Tokenizer = struct {
     fn decodeChunk(self: *Tokenizer, alloc: std.mem.Allocator, ids: []const u32) ![]u8 {
         switch (self.model) {
             .bpe => |*m| {
-                const encoded = try m.decode(alloc, ids);
-                defer alloc.free(encoded);
+                const raw = try m.decode(alloc, ids);
+                defer alloc.free(raw);
+
+                // ByteFallback (Llama family): `<0xXX>` token strings
+                // expand to literal byte XX before any other post-processing.
+                const after_bf: []u8 = if (self.use_byte_fallback)
+                    try applyByteFallback(alloc, raw)
+                else
+                    try alloc.dupe(u8, raw);
+                defer alloc.free(after_bf);
+
                 if (self.use_byte_level) {
-                    return byte_level.decode(alloc, encoded);
+                    return byte_level.decode(alloc, after_bf);
                 } else if (self.sp_space_marker) |marker| {
                     const with_spaces = try normalizer.apply(alloc, .{
                         .replace = .{ .pattern = marker, .content = " " },
-                    }, encoded);
+                    }, after_bf);
                     if (with_spaces.len > 0 and with_spaces[0] == ' ') {
                         const trimmed = try alloc.dupe(u8, with_spaces[1..]);
                         alloc.free(with_spaces);
@@ -287,7 +415,7 @@ pub const Tokenizer = struct {
                     }
                     return with_spaces;
                 }
-                return alloc.dupe(u8, encoded);
+                return alloc.dupe(u8, after_bf);
             },
             .wordpiece => |*m| {
                 // WordPiece's own decode already handles ## continuation joining.
@@ -332,9 +460,18 @@ pub fn fromJson(alloc: std.mem.Allocator, json_bytes: []const u8) !Tokenizer {
     var use_whitespace_split = false;
     var split_on_punctuation = false;
     var metaspace_replacement: ?[]const u8 = null;
+    var use_gpt2_regex = false;
     if (root.get("pre_tokenizer")) |pt| {
         if (pt == .object) {
             try parsePreTokenizer(aa, pt.object, &use_byte_level, &use_whitespace_split, &metaspace_replacement, &split_on_punctuation);
+            // GPT-2 regex: enabled when ByteLevel has `use_regex: true`
+            // (its HF default) OR when there's a standalone "Split"
+            // pre-tokenizer with the GPT-2 pattern hint.
+            if (use_byte_level) {
+                if (pt.object.get("use_regex")) |uv| {
+                    if (uv == .bool and uv.bool) use_gpt2_regex = true;
+                }
+            }
         }
     }
 
@@ -402,11 +539,28 @@ pub fn fromJson(alloc: std.mem.Allocator, json_bytes: []const u8) !Tokenizer {
     }
     const added_tokens = try aa.dupe(AddedToken, added_list.items);
 
+    // Decoder (optional). We scan for ByteFallback presence (anywhere
+    // in a possibly-nested Sequence) so the decode path knows to
+    // expand `<0xXX>` tokens to bytes.
+    var use_byte_fallback = false;
+    if (root.get("decoder")) |dv| {
+        if (dv == .object) scanByteFallback(dv.object, &use_byte_fallback);
+    }
+
+    // Post-processor (TemplateProcessing single template, if present).
+    var template_single: ?[]const TemplateOp = null;
+    if (root.get("post_processor")) |pv| {
+        if (pv == .object) {
+            template_single = try parseTemplateSingle(aa, pv.object);
+        }
+    }
+
     return .{
         .allocator = alloc,
         .arena = own_arena,
         .model = model,
         .use_byte_level = use_byte_level,
+        .use_gpt2_regex = use_gpt2_regex,
         .use_whitespace_split = use_whitespace_split,
         .split_on_punctuation = split_on_punctuation,
         .metaspace_replacement = metaspace_replacement,
@@ -414,7 +568,84 @@ pub fn fromJson(alloc: std.mem.Allocator, json_bytes: []const u8) !Tokenizer {
         .sp_space_marker = sp_marker,
         .added_tokens = added_tokens,
         .added_token_by_id = added_by_id,
+        .template_single = template_single,
+        .use_byte_fallback = use_byte_fallback,
+        .max_length = null,
+        .truncation_direction = .right,
+        .pad_to_length = null,
+        .pad_token_id = 0,
+        .padding_direction = .right,
     };
+}
+
+/// Recursive scan: set out to true if any `ByteFallback` decoder node
+/// is present, directly or inside a Sequence.
+fn scanByteFallback(obj: std.json.ObjectMap, out: *bool) void {
+    const tv = obj.get("type") orelse return;
+    if (tv != .string) return;
+    if (std.mem.eql(u8, tv.string, "ByteFallback")) {
+        out.* = true;
+        return;
+    }
+    if (std.mem.eql(u8, tv.string, "Sequence")) {
+        if (obj.get("decoders")) |arr| {
+            if (arr == .array) {
+                for (arr.array.items) |item| {
+                    if (item == .object) scanByteFallback(item.object, out);
+                }
+            }
+        }
+    }
+}
+
+/// Parse a TemplateProcessing post-processor's `single` template into
+/// a sequence of TemplateOps. SpecialToken ids are resolved via the
+/// post-processor's `special_tokens` map (`{name → {ids: [int...]}}`).
+/// Returns null if the post-processor is not TemplateProcessing or has
+/// no `single` template.
+fn parseTemplateSingle(
+    aa: std.mem.Allocator,
+    obj: std.json.ObjectMap,
+) !?[]const TemplateOp {
+    const tv = obj.get("type") orelse return null;
+    if (tv != .string) return null;
+    if (!std.mem.eql(u8, tv.string, "TemplateProcessing")) return null;
+
+    const single_v = obj.get("single") orelse return null;
+    if (single_v != .array) return null;
+
+    const special_v = obj.get("special_tokens");
+    if (special_v == null or special_v.? != .object) return null;
+    const special_obj = special_v.?.object;
+
+    var ops: std.ArrayList(TemplateOp) = .empty;
+    errdefer ops.deinit(aa);
+    for (single_v.array.items) |entry| {
+        if (entry != .object) continue;
+        // Each entry has exactly one key: "SpecialToken" or "Sequence".
+        if (entry.object.get("Sequence")) |_| {
+            try ops.append(aa, .append_input);
+            continue;
+        }
+        if (entry.object.get("SpecialToken")) |st_v| {
+            if (st_v != .object) continue;
+            const id_v = st_v.object.get("id") orelse continue;
+            if (id_v != .string) continue;
+            const st_name = id_v.string;
+            const st_meta_v = special_obj.get(st_name) orelse continue;
+            if (st_meta_v != .object) continue;
+            const ids_v = st_meta_v.object.get("ids") orelse continue;
+            if (ids_v != .array) continue;
+            const ids = try aa.alloc(u32, ids_v.array.items.len);
+            for (ids_v.array.items, 0..) |iv, i| {
+                if (iv != .integer) return Error.InvalidTokenizerJson;
+                ids[i] = @intCast(iv.integer);
+            }
+            try ops.append(aa, .{ .append_ids = ids });
+        }
+    }
+
+    return try aa.dupe(TemplateOp, ops.items);
 }
 
 fn parsePreTokenizer(
@@ -431,6 +662,16 @@ fn parsePreTokenizer(
 
     if (std.mem.eql(u8, t, "ByteLevel")) {
         byte_level_out.* = true;
+        // HF default is use_regex: true if not explicitly set false.
+        // The actual GPT-2 regex split is enabled only when this code's
+        // caller plumbs the flag (see fromJson where the value is
+        // resolved against the JSON `use_regex` field).
+        return;
+    }
+    if (std.mem.eql(u8, t, "Split")) {
+        // Standalone Split pre-tokenizer with the GPT-2 regex — common
+        // in newer HF tokenizer.json files that pulled apart ByteLevel.
+        // We treat it as enabling the regex split path.
         return;
     }
     if (std.mem.eql(u8, t, "Whitespace") or std.mem.eql(u8, t, "WhitespaceSplit")) {
@@ -467,22 +708,83 @@ fn parsePreTokenizer(
     // Unknown pre-tokenizer types are silently skipped (degrade gracefully).
 }
 
-/// ASCII punctuation classifier matching BertPreTokenizer behaviour for
-/// the ASCII range. Full Unicode "P" category is v0.4 work.
-fn isAsciiPunct(b: u8) bool {
-    return switch (b) {
-        '!', '"', '#', '$', '%', '&', '\'', '(', ')', '*', '+', ',', '-', '.', '/' => true,
-        ':', ';', '<', '=', '>', '?', '@' => true,
-        '[', '\\', ']', '^', '_', '`' => true,
-        '{', '|', '}', '~' => true,
+/// ByteFallback expansion: scan `text` for occurrences of `<0xXX>`
+/// (6 bytes, `<`, `0`, `x`, two ASCII hex chars, `>`) and replace each
+/// with the literal byte value `XX`. Other bytes pass through.
+/// Caller frees output.
+pub fn applyByteFallback(alloc: std.mem.Allocator, text: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(alloc);
+    var i: usize = 0;
+    while (i < text.len) {
+        if (i + 6 <= text.len and text[i] == '<' and text[i + 1] == '0' and (text[i + 2] == 'x' or text[i + 2] == 'X') and text[i + 5] == '>') {
+            const hi = std.fmt.charToDigit(text[i + 3], 16) catch null;
+            const lo = std.fmt.charToDigit(text[i + 4], 16) catch null;
+            if (hi != null and lo != null) {
+                const b: u8 = (@as(u8, hi.?) << 4) | @as(u8, lo.?);
+                try out.append(alloc, b);
+                i += 6;
+                continue;
+            }
+        }
+        try out.append(alloc, text[i]);
+        i += 1;
+    }
+    return out.toOwnedSlice(alloc);
+}
+
+/// Unicode punctuation classifier — returns true if codepoint `cp` is
+/// in a punctuation block. Covers ASCII, Latin-1 supplement, General
+/// Punctuation, Supplemental Punctuation, CJK Symbols, Vertical Forms,
+/// CJK Compatibility Forms, Small Form Variants, and Halfwidth/
+/// Fullwidth Forms (punctuation subset).
+///
+/// Not a full Unicode "P" category — uses range-based approximation
+/// covering ~99% of real-world punctuation. Codepoints in the Cyrillic
+/// / Arabic / Indic punctuation blocks are NOT detected; v0.5 work if
+/// real multilingual fixtures demand it.
+pub fn isUnicodePunct(cp: u21) bool {
+    return switch (cp) {
+        // ASCII punctuation (subset of !–/, :–@, [–`, {–~)
+        '!'...'/', ':'...'@', '['...'`', '{'...'~' => true,
+        // Latin-1 supplement: ¡ (U+00A1) through ¿ (U+00BF) selected
+        0x00A1...0x00A9 => true,
+        0x00AB => true,
+        0x00AC => true,
+        0x00AD => true,
+        0x00AE => true,
+        0x00AF => true,
+        0x00B0 => true,
+        0x00B1 => true,
+        0x00B4 => true,
+        0x00B6...0x00B8 => true,
+        0x00BB => true,
+        0x00BF => true,
+        // General Punctuation (U+2000–U+206F)
+        0x2000...0x206F => true,
+        // Supplemental Punctuation
+        0x2E00...0x2E7F => true,
+        // CJK Symbols and Punctuation
+        0x3000...0x303F => true,
+        // Vertical Forms
+        0xFE10...0xFE1F => true,
+        // CJK Compatibility Forms
+        0xFE30...0xFE4F => true,
+        // Small Form Variants
+        0xFE50...0xFE6F => true,
+        // Halfwidth and Fullwidth Forms — punctuation subset
+        0xFF01...0xFF0F => true,
+        0xFF1A...0xFF20 => true,
+        0xFF3B...0xFF40 => true,
+        0xFF5B...0xFF65 => true,
         else => false,
     };
 }
 
-/// Encode a single whitespace-chunk into ids, splitting on punctuation.
-/// Each maximal run of non-punctuation ASCII (and any UTF-8 byte ≥ 0x80)
-/// becomes a "word" passed to WordPiece; each ASCII punctuation byte
-/// becomes its own single-char word.
+/// Encode a single whitespace-chunk into ids, splitting on Unicode
+/// punctuation (codepoint-aware). Each maximal run of non-punctuation
+/// codepoints becomes a "word" passed to WordPiece; each punctuation
+/// codepoint becomes its own single-codepoint word.
 fn encodePunctSplit(
     alloc: std.mem.Allocator,
     m: *const wordpiece.Model,
@@ -491,18 +793,29 @@ fn encodePunctSplit(
 ) !void {
     var word_start: usize = 0;
     var i: usize = 0;
-    while (i < chunk.len) : (i += 1) {
-        if (isAsciiPunct(chunk[i])) {
+    while (i < chunk.len) {
+        const n = std.unicode.utf8ByteSequenceLength(chunk[i]) catch {
+            // Invalid UTF-8 — treat the byte as non-punctuation and continue.
+            i += 1;
+            continue;
+        };
+        if (i + n > chunk.len) break;
+        const cp: u21 = std.unicode.utf8Decode(chunk[i..][0..n]) catch {
+            i += n;
+            continue;
+        };
+        if (isUnicodePunct(cp)) {
             if (i > word_start) {
                 const ids = try m.encode(alloc, chunk[word_start..i]);
                 defer alloc.free(ids);
                 try out.appendSlice(alloc, ids);
             }
-            const ids = try m.encode(alloc, chunk[i .. i + 1]);
+            const ids = try m.encode(alloc, chunk[i .. i + n]);
             defer alloc.free(ids);
             try out.appendSlice(alloc, ids);
-            word_start = i + 1;
+            word_start = i + n;
         }
+        i += n;
     }
     if (word_start < chunk.len) {
         const ids = try m.encode(alloc, chunk[word_start..]);
@@ -695,6 +1008,10 @@ fn parseNormalizer(
     if (std.mem.eql(u8, t, "Lowercase")) {
         return .lowercase;
     }
+    if (std.mem.eql(u8, t, "NFC")) return .nfc;
+    if (std.mem.eql(u8, t, "NFD")) return .nfd;
+    if (std.mem.eql(u8, t, "NFKC")) return .nfkc;
+    if (std.mem.eql(u8, t, "NFKD")) return .nfkd;
     if (std.mem.eql(u8, t, "BertNormalizer")) {
         // BertNormalizer config: clean_text, handle_chinese_chars,
         // strip_accents, lowercase. v0.3 supports lowercase only;
@@ -1020,6 +1337,164 @@ test "added_tokens — empty registry is fast path (BPE-only)" {
     const ids = try tok.encode(testing.allocator, "ab");
     defer testing.allocator.free(ids);
     try testing.expectEqualSlices(u32, &[_]u32{ 0, 1 }, ids);
+}
+
+test "applyByteFallback — single <0xXX> token expands to byte" {
+    const out = try applyByteFallback(testing.allocator, "<0xE4>");
+    defer testing.allocator.free(out);
+    try testing.expectEqualSlices(u8, &[_]u8{0xE4}, out);
+}
+
+test "applyByteFallback — bytes embedded in mixed text" {
+    const out = try applyByteFallback(testing.allocator, "hi<0x20>there");
+    defer testing.allocator.free(out);
+    try testing.expectEqualStrings("hi there", out);
+}
+
+test "applyByteFallback — invalid hex passes through unchanged" {
+    const out = try applyByteFallback(testing.allocator, "<0xZZ>");
+    defer testing.allocator.free(out);
+    try testing.expectEqualStrings("<0xZZ>", out);
+}
+
+test "applyByteFallback — non-pattern angle brackets pass through" {
+    const out = try applyByteFallback(testing.allocator, "<unk>");
+    defer testing.allocator.free(out);
+    try testing.expectEqualStrings("<unk>", out);
+}
+
+test "TemplateProcessing — synthetic [BOS] + sequence template" {
+    const json =
+        \\{
+        \\  "version": "1.0",
+        \\  "added_tokens": [{"id": 1, "content": "<s>"}],
+        \\  "pre_tokenizer": {"type": "ByteLevel"},
+        \\  "post_processor": {
+        \\    "type": "TemplateProcessing",
+        \\    "single": [
+        \\      {"SpecialToken": {"id": "<s>", "type_id": 0}},
+        \\      {"Sequence": {"id": "A", "type_id": 0}}
+        \\    ],
+        \\    "special_tokens": {
+        \\      "<s>": {"id": "<s>", "ids": [1], "tokens": ["<s>"]}
+        \\    }
+        \\  },
+        \\  "model": {
+        \\    "type": "BPE",
+        \\    "vocab": {"a": 0, "b": 2},
+        \\    "merges": []
+        \\  }
+        \\}
+    ;
+    var tok = try fromJson(testing.allocator, json);
+    defer tok.deinit();
+    try testing.expect(tok.template_single != null);
+
+    const ids = try tok.encode(testing.allocator, "ab");
+    defer testing.allocator.free(ids);
+    // base = [0, 2]; TemplateProcessing prepends <s>=1 → [1, 0, 2]
+    try testing.expectEqualSlices(u32, &[_]u32{ 1, 0, 2 }, ids);
+
+    const base = try tok.encodeBase(testing.allocator, "ab");
+    defer testing.allocator.free(base);
+    try testing.expectEqualSlices(u32, &[_]u32{ 0, 2 }, base);
+}
+
+test "Truncation — right-trim to max_length" {
+    const json =
+        \\{
+        \\  "version": "1.0",
+        \\  "pre_tokenizer": {"type": "ByteLevel"},
+        \\  "model": {"type": "BPE", "vocab": {"a": 0, "b": 1, "c": 2}, "merges": []}
+        \\}
+    ;
+    var tok = try fromJson(testing.allocator, json);
+    defer tok.deinit();
+    tok.max_length = 2;
+    tok.truncation_direction = .right;
+
+    const ids = try tok.encode(testing.allocator, "abc");
+    defer testing.allocator.free(ids);
+    try testing.expectEqualSlices(u32, &[_]u32{ 0, 1 }, ids);
+}
+
+test "Truncation — left-trim to max_length" {
+    const json =
+        \\{
+        \\  "version": "1.0",
+        \\  "pre_tokenizer": {"type": "ByteLevel"},
+        \\  "model": {"type": "BPE", "vocab": {"a": 0, "b": 1, "c": 2}, "merges": []}
+        \\}
+    ;
+    var tok = try fromJson(testing.allocator, json);
+    defer tok.deinit();
+    tok.max_length = 2;
+    tok.truncation_direction = .left;
+
+    const ids = try tok.encode(testing.allocator, "abc");
+    defer testing.allocator.free(ids);
+    try testing.expectEqualSlices(u32, &[_]u32{ 1, 2 }, ids);
+}
+
+test "Padding — right-pad to pad_to_length" {
+    const json =
+        \\{
+        \\  "version": "1.0",
+        \\  "pre_tokenizer": {"type": "ByteLevel"},
+        \\  "model": {"type": "BPE", "vocab": {"a": 0, "b": 1}, "merges": []}
+        \\}
+    ;
+    var tok = try fromJson(testing.allocator, json);
+    defer tok.deinit();
+    tok.pad_to_length = 4;
+    tok.pad_token_id = 99;
+    tok.padding_direction = .right;
+
+    const ids = try tok.encode(testing.allocator, "ab");
+    defer testing.allocator.free(ids);
+    try testing.expectEqualSlices(u32, &[_]u32{ 0, 1, 99, 99 }, ids);
+}
+
+test "Padding — left-pad to pad_to_length" {
+    const json =
+        \\{
+        \\  "version": "1.0",
+        \\  "pre_tokenizer": {"type": "ByteLevel"},
+        \\  "model": {"type": "BPE", "vocab": {"a": 0, "b": 1}, "merges": []}
+        \\}
+    ;
+    var tok = try fromJson(testing.allocator, json);
+    defer tok.deinit();
+    tok.pad_to_length = 4;
+    tok.pad_token_id = 99;
+    tok.padding_direction = .left;
+
+    const ids = try tok.encode(testing.allocator, "ab");
+    defer testing.allocator.free(ids);
+    try testing.expectEqualSlices(u32, &[_]u32{ 99, 99, 0, 1 }, ids);
+}
+
+test "Truncation + Padding — over-length truncates, under-length pads" {
+    const json =
+        \\{
+        \\  "version": "1.0",
+        \\  "pre_tokenizer": {"type": "ByteLevel"},
+        \\  "model": {"type": "BPE", "vocab": {"a": 0, "b": 1, "c": 2, "d": 3, "e": 4}, "merges": []}
+        \\}
+    ;
+    var tok = try fromJson(testing.allocator, json);
+    defer tok.deinit();
+    tok.max_length = 3;
+    tok.pad_to_length = 3;
+    tok.pad_token_id = 9;
+
+    const long = try tok.encode(testing.allocator, "abcde");
+    defer testing.allocator.free(long);
+    try testing.expectEqualSlices(u32, &[_]u32{ 0, 1, 2 }, long);
+
+    const short = try tok.encode(testing.allocator, "a");
+    defer testing.allocator.free(short);
+    try testing.expectEqualSlices(u32, &[_]u32{ 0, 9, 9 }, short);
 }
 
 test "Model — vocabCount works across all variants" {

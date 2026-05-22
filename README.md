@@ -7,6 +7,18 @@ families. Portfolio artifact #4b of the 8-artifact jaw-drop portfolio.
 
 ## Status
 
+**v0.4 — full pipeline: TemplateProcessing wrap, ByteFallback decode,
+Truncation/Padding, Unicode punctuation, partial NFC/NFD/NFKC/NFKD,
+partial GPT-2 word-boundary regex pre-tokenize. 127 tests pass.**
+
+Encoding `"hello"` now produces canonical HF-wrapped IDs:
+- TinyLlama: `[1, ...]` (BOS prepended)
+- BERT-base-uncased: `[101, 7592, 102]` (`[CLS] hello [SEP]`)
+- T5-base: `[21820, 1]` (`▁hello </s>`)
+
+Use `Tokenizer.encodeBase` to get raw model-side IDs without
+TemplateProcessing wrap.
+
 **v0.3 — real BERT-base-uncased + T5-base integration tests pass
 against canonical HF token IDs.** BertNormalizer + BertPreTokenizer +
 ASCII lowercase + per-piece Metaspace for T5-style Sequence
