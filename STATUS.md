@@ -1,7 +1,18 @@
 # STATUS
 
-**Version:** v0.14
+**Version:** v0.15
 **Last update:** 2026-05-22
+
+## What landed in v0.15 (on top of v0.14)
+
+- **`encodeWithOffsets(text) → EncodeWithOffsetsResult`** returns
+  ids + per-token byte offsets in the original text.
+- WordPiece + whitespace_split: word-level offset granularity.
+- Added tokens: exact match offsets.
+- Other pipelines: full chunk range.
+- Word-level (not sub-word) — true sub-word offsets are future work.
+
+165 tests pass.
 
 ## What landed in v0.14 (on top of v0.13)
 

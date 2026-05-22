@@ -2461,6 +2461,65 @@ test "encodeBatchParallel — produces same output as encodeBatch (4 threads)" {
     for (seq, par) |s, p| try testing.expectEqualSlices(u32, s, p);
 }
 
+test "encodeWithOffsets — WordPiece synthetic tags per-word ranges" {
+    const json =
+        \\{
+        \\  "version": "1.0",
+        \\  "pre_tokenizer": {"type": "BertPreTokenizer"},
+        \\  "model": {
+        \\    "type": "WordPiece",
+        \\    "vocab": {"[UNK]": 0, "hello": 1, "world": 2, "!": 3},
+        \\    "unk_token": "[UNK]",
+        \\    "continuing_subword_prefix": "##",
+        \\    "max_input_chars_per_word": 100
+        \\  }
+        \\}
+    ;
+    var tok = try fromJson(testing.allocator, json);
+    defer tok.deinit();
+
+    const result = try tok.encodeWithOffsets(testing.allocator, "hello world!");
+    defer result.deinit(testing.allocator);
+
+    // "hello"=1 at [0,5], "world"=2 at [6,12], "!"=3 at [6,12] (punct split same chunk).
+    try testing.expectEqualSlices(u32, &[_]u32{ 1, 2, 3 }, result.ids);
+    try testing.expectEqual(@as(u32, 0), result.offsets[0].start);
+    try testing.expectEqual(@as(u32, 5), result.offsets[0].end);
+    try testing.expectEqual(@as(u32, 6), result.offsets[1].start);
+    try testing.expectEqual(@as(u32, 12), result.offsets[1].end);
+    try testing.expectEqual(@as(u32, 6), result.offsets[2].start);
+    try testing.expectEqual(@as(u32, 12), result.offsets[2].end);
+}
+
+test "encodeWithOffsets — added tokens get exact match offsets" {
+    const json =
+        \\{
+        \\  "version": "1.0",
+        \\  "added_tokens": [{"id": 101, "content": "[CLS]"}],
+        \\  "pre_tokenizer": {"type": "BertPreTokenizer"},
+        \\  "model": {
+        \\    "type": "WordPiece",
+        \\    "vocab": {"[UNK]": 0, "hi": 1},
+        \\    "unk_token": "[UNK]",
+        \\    "continuing_subword_prefix": "##",
+        \\    "max_input_chars_per_word": 100
+        \\  }
+        \\}
+    ;
+    var tok = try fromJson(testing.allocator, json);
+    defer tok.deinit();
+
+    const result = try tok.encodeWithOffsets(testing.allocator, "[CLS] hi");
+    defer result.deinit(testing.allocator);
+
+    try testing.expectEqualSlices(u32, &[_]u32{ 101, 1 }, result.ids);
+    // [CLS] at [0,5]; hi at [6,8].
+    try testing.expectEqual(@as(u32, 0), result.offsets[0].start);
+    try testing.expectEqual(@as(u32, 5), result.offsets[0].end);
+    try testing.expectEqual(@as(u32, 6), result.offsets[1].start);
+    try testing.expectEqual(@as(u32, 8), result.offsets[1].end);
+}
+
 test "encodeBatchWithTypes — returns parallel EncodeResults" {
     const json =
         \\{

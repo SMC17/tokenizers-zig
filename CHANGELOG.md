@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.15.0 — 2026-05-22
+
+Token byte-offsets for WordPiece (BERT NER use case). 165 tests pass.
+
+### encodeWithOffsets
+
+- New `EncodeWithOffsetsResult { ids, offsets }` returned by
+  `Tokenizer.encodeWithOffsets(text)`.
+- Each `TokenOffset { start, end }` is the byte range in the original
+  input of the source chunk the token came from.
+- **WordPiece + whitespace_split** pipeline (BERT, DistilBERT): each
+  whitespace-separated word gets its own offset; tokens within a word
+  share that range. With BertPreTokenizer punctuation-split, each
+  punctuation char shares the parent word's range.
+- **Added tokens** (longest-match scan): get the exact byte range of
+  the match in the input.
+- **Other pipelines** (BPE+ByteLevel, Unigram+Metaspace): every token
+  gets the full chunk range `(0, text.len)` since the model operates
+  on the whole text.
+
+### Test count
+
+165 tests pass.
+
+### Known non-claims for v0.15
+
+- Offsets are **word-level**, not sub-word level. WordPiece tokens
+  from the same word share the same range. True sub-word offsets
+  would require tracking byte positions through ByteLevel encode + BPE
+  merge — substantial refactor saved for a future version.
+- Offsets for BPE / Unigram pipelines reflect the chunked encode-input
+  range, not necessarily individual token boundaries.
+
 ## 0.14.0 — 2026-05-22
 
 `tokenize` CLI promoted to a real tool with six subcommands. 163 tests
