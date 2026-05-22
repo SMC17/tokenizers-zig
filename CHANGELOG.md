@@ -1,5 +1,42 @@
 # Changelog
 
+## 0.25.0 — 2026-05-22
+
+Full canonical HF `Encoding` struct + one-shot `encodeFull`/`encodePairFull`
+APIs. 186 tests pass.
+
+### Encoding struct
+
+```zig
+pub const Encoding = struct {
+    ids: []u32,
+    type_ids: []u8,
+    attention_mask: []u8,
+    offsets: []TokenOffset,
+    tokens: [][]const u8,
+    special_tokens_mask: []u8,
+    sequence_ids: ?[]u8,
+};
+```
+
+Mirrors HF tokenizers' Python `Encoding` object — every parallel array
+a downstream model could want, in one allocation pass.
+
+### encodeFull + encodePairFull
+
+- `Tokenizer.encodeFull(text)` returns the single-input Encoding with
+  `sequence_ids == null`.
+- `Tokenizer.encodePairFull(a, b)` returns the pair Encoding with
+  `sequence_ids` populated (0 = A, 1 = B).
+- Internally chains the existing `encodeWithTypes` + `encodeWithOffsets`
+  + introspection paths into one allocation pass.
+- For TemplateProcessing-wrapped tokens (added_tokens like `[CLS]` /
+  `<s>` / `[SEP]`), offsets are `(0, 0)` since they're synthetic.
+
+### Test count
+
+186 tests pass.
+
 ## 0.24.0 — 2026-05-22
 
 `bench-offsets-bert` — sub-token offset encoding throughput bench.
