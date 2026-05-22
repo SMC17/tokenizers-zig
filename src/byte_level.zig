@@ -58,6 +58,29 @@ pub fn encode(alloc: std.mem.Allocator, input: []const u8) ![]u8 {
     return out.toOwnedSlice(alloc);
 }
 
+/// Encode with a parallel `[]u32` per-output-byte index back to the
+/// originating input byte. `result.encoded.len == result.input_index.len`;
+/// `input_index[i]` is the input byte position that produced output[i].
+/// Caller frees both slices.
+pub fn encodeWithOffsets(alloc: std.mem.Allocator, input: []const u8) !struct { encoded: []u8, input_index: []u32 } {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(alloc);
+    var idx: std.ArrayList(u32) = .empty;
+    errdefer idx.deinit(alloc);
+
+    var utf8_buf: [4]u8 = undefined;
+    for (input, 0..) |b, in_pos| {
+        const cp = byte_to_codepoint[b];
+        const n = try std.unicode.utf8Encode(cp, &utf8_buf);
+        try out.appendSlice(alloc, utf8_buf[0..n]);
+        for (0..n) |_| try idx.append(alloc, @intCast(in_pos));
+    }
+    return .{
+        .encoded = try out.toOwnedSlice(alloc),
+        .input_index = try idx.toOwnedSlice(alloc),
+    };
+}
+
 /// Decode a ByteLevel "string" back to the original UTF-8 bytes.
 /// Caller frees the returned slice.
 pub fn decode(alloc: std.mem.Allocator, encoded: []const u8) ![]u8 {
@@ -137,4 +160,26 @@ test "ByteLevel — newline (control char) round-trips" {
     const decoded = try decode(testing.allocator, encoded);
     defer testing.allocator.free(decoded);
     try testing.expectEqualStrings(input, decoded);
+}
+
+test "ByteLevel — encodeWithOffsets tracks input→output byte mapping" {
+    const input = "ab";
+    const r = try encodeWithOffsets(testing.allocator, input);
+    defer testing.allocator.free(r.encoded);
+    defer testing.allocator.free(r.input_index);
+    // 'a' is printable, maps to 'a' (1 byte). 'b' → 'b' (1 byte).
+    try testing.expectEqualStrings("ab", r.encoded);
+    try testing.expectEqual(@as(u32, 0), r.input_index[0]);
+    try testing.expectEqual(@as(u32, 1), r.input_index[1]);
+}
+
+test "ByteLevel — encodeWithOffsets handles 2-byte codepoint expansion" {
+    const input = " "; // space → U+0120 (Ġ), encodes to 2 UTF-8 bytes.
+    const r = try encodeWithOffsets(testing.allocator, input);
+    defer testing.allocator.free(r.encoded);
+    defer testing.allocator.free(r.input_index);
+    try testing.expectEqualSlices(u8, &[_]u8{ 0xC4, 0xA0 }, r.encoded);
+    // Both output bytes point back to input byte 0.
+    try testing.expectEqual(@as(u32, 0), r.input_index[0]);
+    try testing.expectEqual(@as(u32, 0), r.input_index[1]);
 }

@@ -339,7 +339,36 @@ pub const Tokenizer = struct {
             return;
         }
 
-        // Other pipelines: tag every token with the whole-chunk range.
+        // BPE + ByteLevel pipeline: track sub-token offsets through
+        // ByteLevel encode → BPE merge. Each token's byte range maps
+        // back to the original input via the ByteLevel input_index table.
+        if (self.model == .bpe and self.use_byte_level) {
+            const normalized = try normalizer.apply(alloc, self.normalizer, chunk_text);
+            defer alloc.free(normalized);
+            const bl = try byte_level.encodeWithOffsets(alloc, normalized);
+            defer alloc.free(bl.encoded);
+            defer alloc.free(bl.input_index);
+            const r = try self.model.bpe.encodeWithOffsets(alloc, bl.encoded);
+            defer alloc.free(r.ids);
+            defer alloc.free(r.offsets);
+            for (r.ids, r.offsets) |id, off| {
+                try ids_out.append(alloc, id);
+                // Map byte_level output bytes back to input bytes via input_index.
+                // off[0] = first byte_level byte → input_index[off[0]] = first input byte.
+                // off[1] = exclusive end → look up the last included byte (off[1]-1) and add 1.
+                const in_start: u32 = if (off[0] < bl.input_index.len) bl.input_index[off[0]] else @intCast(normalized.len);
+                const in_end: u32 = if (off[1] > 0 and off[1] - 1 < bl.input_index.len) bl.input_index[off[1] - 1] + 1 else @intCast(normalized.len);
+                try off_out.append(alloc, .{
+                    .start = @as(u32, @intCast(start)) + in_start,
+                    .end = @as(u32, @intCast(start)) + in_end,
+                });
+            }
+            return;
+        }
+
+        // Other pipelines (BPE+SP, Unigram+Metaspace): tag every token
+        // with the whole-chunk range. Sub-token offsets through normalize
+        // / metaspace are v0.18 work.
         const before = ids_out.items.len;
         const chunk_ids = try self.encodeChunk(alloc, chunk_text);
         defer alloc.free(chunk_ids);
@@ -2522,6 +2551,40 @@ test "encodeBatchParallel — produces same output as encodeBatch (4 threads)" {
 
     try testing.expectEqual(seq.len, par.len);
     for (seq, par) |s, p| try testing.expectEqualSlices(u32, s, p);
+}
+
+test "encodeWithOffsets — BPE+ByteLevel sub-token offsets" {
+    const json =
+        \\{
+        \\  "version": "1.0",
+        \\  "pre_tokenizer": {"type": "ByteLevel"},
+        \\  "model": {
+        \\    "type": "BPE",
+        \\    "vocab": {"h": 0, "e": 1, "l": 2, "o": 3, "he": 4, "ll": 5, "hello": 6},
+        \\    "merges": ["h e", "l l", "he llo"]
+        \\  }
+        \\}
+    ;
+    var tok = try fromJson(testing.allocator, json);
+    defer tok.deinit();
+
+    const r = try tok.encodeWithOffsets(testing.allocator, "hello");
+    defer r.deinit(testing.allocator);
+
+    // Merge order: h+e=he, l+l=ll, then... actually 'hello' isn't reachable
+    // from these merges directly. Let me trace:
+    //   h e l l o → after h+e: he l l o → after l+l: he ll o
+    //   "he llo" merge needs "he ll" pair? No, looks for "he ll" exactly.
+    //   Actually merges are (left right) string keys. We have ("he", "llo")
+    //   but "llo" isn't a piece yet. So encoding stops at [he, ll, o].
+    // The range of `he` covers byte 0-2, `ll` covers 2-4, `o` covers 4-5.
+    try testing.expectEqualSlices(u32, &[_]u32{ 4, 5, 3 }, r.ids);
+    try testing.expectEqual(@as(u32, 0), r.offsets[0].start);
+    try testing.expectEqual(@as(u32, 2), r.offsets[0].end);
+    try testing.expectEqual(@as(u32, 2), r.offsets[1].start);
+    try testing.expectEqual(@as(u32, 4), r.offsets[1].end);
+    try testing.expectEqual(@as(u32, 4), r.offsets[2].start);
+    try testing.expectEqual(@as(u32, 5), r.offsets[2].end);
 }
 
 test "encodeWithOffsets — WordPiece sub-word ranges within a word" {

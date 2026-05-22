@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.17.0 — 2026-05-22
+
+Sub-token offsets through ByteLevel + BPE merge. 173 tests pass.
+
+### byte_level.encodeWithOffsets
+
+- Returns parallel `encoded` + `input_index: []u32` where
+  `input_index[i]` is the input byte that produced output byte `i`.
+- Handles 2-byte UTF-8 codepoint expansion (e.g. space → Ġ): both
+  output bytes point back to the same input position.
+
+### bpe.encodeWithOffsets
+
+- Parallel `bpeEncodePQWithOffsets` mirrors the production PQ-based
+  merge loop but carries `(start, end)` byte ranges through the
+  doubly-linked-list nodes. On merge, the combined piece's range
+  absorbs the right child's `end`.
+- New `EncodedWithOffsets { ids, offsets }` named return type.
+
+### Tokenizer.encodeWithOffsets — BPE+ByteLevel path
+
+- Now produces true sub-token byte ranges in the original input:
+  `normalize → byte_level.encodeWithOffsets → bpe.encodeWithOffsets →
+  remap via input_index`.
+- Verified: encoding "hello" with merges (h e), (l l) emits
+  `[he, ll, o]` with offsets `[0,2]`, `[2,4]`, `[4,5]`.
+- Other pipelines (BPE+SP marker, Unigram+Metaspace) still use the
+  whole-chunk range — sub-token through normalize/metaspace is v0.18
+  work.
+
+### Test count
+
+173 tests pass.
+
 ## 0.16.0 — 2026-05-22
 
 True sub-word token offsets for WordPiece. NER-grade precision.

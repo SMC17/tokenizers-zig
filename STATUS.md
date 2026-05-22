@@ -1,7 +1,19 @@
 # STATUS
 
-**Version:** v0.16
+**Version:** v0.17
 **Last update:** 2026-05-22
+
+## What landed in v0.17 (on top of v0.16)
+
+- **`byte_level.encodeWithOffsets`** — parallel `input_index` table
+  for output-byte → input-byte mapping.
+- **`bpe.encodeWithOffsets`** — PQ-based merge tracks `(start, end)`
+  byte ranges through DLL nodes; merged ranges absorb the right's end.
+- **`Tokenizer.encodeWithOffsets` BPE+ByteLevel path** — true sub-token
+  byte ranges in the original input via the byte_level remap chain.
+  GPT-2/Qwen/RoBERTa pipelines now produce per-token NER-grade offsets.
+
+173 tests pass.
 
 ## What landed in v0.16 (on top of v0.15)
 
