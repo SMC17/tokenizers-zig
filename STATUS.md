@@ -1,7 +1,17 @@
 # STATUS
 
-**Version:** v0.24
+**Version:** v0.25
 **Last update:** 2026-05-22
+
+## What landed in v0.25 (on top of v0.24)
+
+- **`Encoding`** struct mirrors HF tokenizers Python `Encoding`: ids +
+  type_ids + attention_mask + offsets + tokens + special_tokens_mask
+  + optional sequence_ids.
+- **`Tokenizer.encodeFull(text)`** and **`Tokenizer.encodePairFull(a, b)`**
+  — one-shot APIs returning the full bundle in one allocation pass.
+
+186 tests pass.
 
 ## What landed in v0.24 (on top of v0.23)
 

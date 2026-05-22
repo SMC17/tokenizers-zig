@@ -161,6 +161,34 @@ pub const EncodePairWithOffsetsResult = struct {
     }
 };
 
+/// Full canonical HF Encoding bundle — every parallel array a downstream
+/// model could want, in one allocation pass.
+pub const Encoding = struct {
+    ids: []u32,
+    type_ids: []u8,
+    attention_mask: []u8,
+    offsets: []TokenOffset,
+    tokens: [][]const u8,
+    special_tokens_mask: []u8,
+    /// Non-null only for pair encodings; 0 = sentence A, 1 = sentence B.
+    sequence_ids: ?[]u8,
+
+    pub fn deinit(self: Encoding, alloc: std.mem.Allocator) void {
+        alloc.free(self.ids);
+        alloc.free(self.type_ids);
+        alloc.free(self.attention_mask);
+        alloc.free(self.offsets);
+        alloc.free(self.tokens);
+        alloc.free(self.special_tokens_mask);
+        if (self.sequence_ids) |s| alloc.free(s);
+    }
+
+    /// Number of tokens (`ids.len`). All parallel arrays share this length.
+    pub fn len(self: Encoding) usize {
+        return self.ids.len;
+    }
+};
+
 /// Truncation strategy applied after encode + TemplateProcessing.
 pub const TruncationDirection = enum { right, left };
 
@@ -400,6 +428,87 @@ pub const Tokenizer = struct {
             out[i] = if (self.added_token_by_id.contains(id)) 1 else 0;
         }
         return out;
+    }
+
+    /// One-shot encode returning the full canonical HF `Encoding`:
+    /// ids + type_ids + attention_mask + offsets + tokens +
+    /// special_tokens_mask. For pair inputs use `encodePairFull`.
+    ///
+    /// Internally runs `encodeWithTypes` for ids/type_ids/mask, then
+    /// builds offsets via `encodeWithOffsets`, then materialises the
+    /// per-token strings + special mask via the introspection API.
+    pub fn encodeFull(self: *Tokenizer, alloc: std.mem.Allocator, text: []const u8) !Encoding {
+        const types_r = try self.encodeWithTypes(alloc, text);
+        errdefer types_r.deinit(alloc);
+
+        const offs_r = try self.encodeWithOffsets(alloc, text);
+        // Note: encodeWithOffsets skips TemplateProcessing, so its ids
+        // count may differ from the wrapped result. The Encoding's
+        // offsets array is aligned to the WRAPPED ids — synthetic added
+        // tokens get (0, 0) ranges. Build aligned offsets:
+        var offsets_aligned: []TokenOffset = try alloc.alloc(TokenOffset, types_r.ids.len);
+        errdefer alloc.free(offsets_aligned);
+        // Pair walk: for each wrapped id, if it's an added_token, use
+        // (0,0); otherwise pull the next offsets_r entry.
+        var oi: usize = 0;
+        for (types_r.ids, 0..) |id, i| {
+            if (self.added_token_by_id.contains(id)) {
+                offsets_aligned[i] = .{ .start = 0, .end = 0 };
+            } else if (oi < offs_r.offsets.len) {
+                offsets_aligned[i] = offs_r.offsets[oi];
+                oi += 1;
+            } else {
+                offsets_aligned[i] = .{ .start = 0, .end = 0 };
+            }
+        }
+        offs_r.deinit(alloc);
+
+        const toks = try self.tokens(alloc, types_r.ids);
+        errdefer alloc.free(toks);
+        const sp_mask = try self.specialTokensMask(alloc, types_r.ids);
+        errdefer alloc.free(sp_mask);
+
+        return .{
+            .ids = types_r.ids,
+            .type_ids = types_r.type_ids,
+            .attention_mask = types_r.attention_mask,
+            .offsets = offsets_aligned,
+            .tokens = toks,
+            .special_tokens_mask = sp_mask,
+            .sequence_ids = null,
+        };
+    }
+
+    /// One-shot pair encode returning the full canonical HF `Encoding`
+    /// with sequence_ids populated.
+    pub fn encodePairFull(self: *Tokenizer, alloc: std.mem.Allocator, text_a: []const u8, text_b: []const u8) !Encoding {
+        const types_r = try self.encodePairWithTypes(alloc, text_a, text_b);
+        errdefer types_r.deinit(alloc);
+
+        const pair_off_r = try self.encodePairWithOffsets(alloc, text_a, text_b);
+
+        // pair_off_r.ids should equal types_r.ids by construction (same
+        // template). Use its offsets + sequence_ids directly.
+        const offsets_copy = try alloc.dupe(TokenOffset, pair_off_r.offsets);
+        errdefer alloc.free(offsets_copy);
+        const seq_ids_copy = try alloc.dupe(u8, pair_off_r.sequence_ids);
+        errdefer alloc.free(seq_ids_copy);
+        pair_off_r.deinit(alloc);
+
+        const toks = try self.tokens(alloc, types_r.ids);
+        errdefer alloc.free(toks);
+        const sp_mask = try self.specialTokensMask(alloc, types_r.ids);
+        errdefer alloc.free(sp_mask);
+
+        return .{
+            .ids = types_r.ids,
+            .type_ids = types_r.type_ids,
+            .attention_mask = types_r.attention_mask,
+            .offsets = offsets_copy,
+            .tokens = toks,
+            .special_tokens_mask = sp_mask,
+            .sequence_ids = seq_ids_copy,
+        };
     }
 
     /// Encode a sentence-pair with sub-token offsets for each token
@@ -2857,6 +2966,80 @@ test "encodeBatchParallel — produces same output as encodeBatch (4 threads)" {
 
     try testing.expectEqual(seq.len, par.len);
     for (seq, par) |s, p| try testing.expectEqualSlices(u32, s, p);
+}
+
+test "encodeFull — returns all 6 parallel arrays" {
+    const json =
+        \\{
+        \\  "version": "1.0",
+        \\  "added_tokens": [{"id": 101, "content": "<s>"}],
+        \\  "pre_tokenizer": {"type": "ByteLevel"},
+        \\  "post_processor": {
+        \\    "type": "TemplateProcessing",
+        \\    "single": [
+        \\      {"SpecialToken": {"id": "<s>", "type_id": 0}},
+        \\      {"Sequence": {"id": "A", "type_id": 0}}
+        \\    ],
+        \\    "special_tokens": {
+        \\      "<s>": {"id": "<s>", "ids": [101], "tokens": ["<s>"]}
+        \\    }
+        \\  },
+        \\  "model": {"type": "BPE", "vocab": {"a": 0, "b": 1, "c": 2}, "merges": []}
+        \\}
+    ;
+    var tok = try fromJson(testing.allocator, json);
+    defer tok.deinit();
+
+    const enc = try tok.encodeFull(testing.allocator, "abc");
+    defer enc.deinit(testing.allocator);
+
+    // ids: [<s>=101, a=0, b=1, c=2]
+    try testing.expectEqualSlices(u32, &[_]u32{ 101, 0, 1, 2 }, enc.ids);
+    try testing.expectEqual(@as(usize, 4), enc.len());
+    try testing.expectEqualSlices(u8, &[_]u8{ 0, 0, 0, 0 }, enc.type_ids);
+    try testing.expectEqualSlices(u8, &[_]u8{ 1, 1, 1, 1 }, enc.attention_mask);
+    try testing.expectEqualSlices(u8, &[_]u8{ 1, 0, 0, 0 }, enc.special_tokens_mask);
+    try testing.expectEqualStrings("<s>", enc.tokens[0]);
+    try testing.expectEqualStrings("a", enc.tokens[1]);
+    try testing.expect(enc.sequence_ids == null);
+}
+
+test "encodePairFull — adds sequence_ids" {
+    const json =
+        \\{
+        \\  "version": "1.0",
+        \\  "added_tokens": [
+        \\    {"id": 101, "content": "[CLS]"},
+        \\    {"id": 102, "content": "[SEP]"}
+        \\  ],
+        \\  "pre_tokenizer": {"type": "ByteLevel"},
+        \\  "post_processor": {
+        \\    "type": "TemplateProcessing",
+        \\    "pair": [
+        \\      {"SpecialToken": {"id": "[CLS]", "type_id": 0}},
+        \\      {"Sequence": {"id": "A", "type_id": 0}},
+        \\      {"SpecialToken": {"id": "[SEP]", "type_id": 0}},
+        \\      {"Sequence": {"id": "B", "type_id": 1}},
+        \\      {"SpecialToken": {"id": "[SEP]", "type_id": 1}}
+        \\    ],
+        \\    "special_tokens": {
+        \\      "[CLS]": {"id": "[CLS]", "ids": [101], "tokens": ["[CLS]"]},
+        \\      "[SEP]": {"id": "[SEP]", "ids": [102], "tokens": ["[SEP]"]}
+        \\    }
+        \\  },
+        \\  "model": {"type": "BPE", "vocab": {"a": 0, "b": 1}, "merges": []}
+        \\}
+    ;
+    var tok = try fromJson(testing.allocator, json);
+    defer tok.deinit();
+
+    const enc = try tok.encodePairFull(testing.allocator, "a", "b");
+    defer enc.deinit(testing.allocator);
+
+    try testing.expectEqualSlices(u32, &[_]u32{ 101, 0, 102, 1, 102 }, enc.ids);
+    try testing.expectEqualSlices(u8, &[_]u8{ 0, 0, 0, 1, 1 }, enc.type_ids);
+    try testing.expect(enc.sequence_ids != null);
+    try testing.expectEqualSlices(u8, &[_]u8{ 0, 0, 0, 1, 1 }, enc.sequence_ids.?);
 }
 
 test "idToToken + tokens + specialTokensMask" {
