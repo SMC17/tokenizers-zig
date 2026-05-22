@@ -62,6 +62,25 @@ pub const Model = union(enum) {
             .unigram => |*m| m.tokens.len,
         };
     }
+
+    /// Look up an id's vocab string. Returns null if the id isn't in
+    /// the model's vocabulary (the caller can check added_tokens next).
+    pub fn idToToken(self: *const Model, id: u32) ?[]const u8 {
+        switch (self.*) {
+            .bpe => |*m| {
+                var it = m.vocab.iterator();
+                while (it.next()) |e| {
+                    if (e.value_ptr.* == id) return e.key_ptr.*;
+                }
+                return null;
+            },
+            .wordpiece => |*m| return m.id_to_token.get(id),
+            .unigram => |*m| {
+                if (id < m.tokens.len) return m.tokens[id];
+                return null;
+            },
+        }
+    }
 };
 
 /// Added-tokens registry. Parsed from the top-level `added_tokens` array
@@ -353,6 +372,34 @@ pub const Tokenizer = struct {
             };
             out[i] = r;
         }
+    }
+
+    /// Look up the vocab string for `id`. Checks added_tokens first
+    /// (special tokens emit their content verbatim), then the model
+    /// vocabulary. Returns null if not found.
+    pub fn idToToken(self: *const Tokenizer, id: u32) ?[]const u8 {
+        if (self.added_token_by_id.get(id)) |content| return content;
+        return self.model.idToToken(id);
+    }
+
+    /// Return the parallel `[]const []const u8` of vocab strings for
+    /// each id. Caller frees the outer slice; the inner strings are
+    /// owned by the Tokenizer's arena and shouldn't be freed.
+    pub fn tokens(self: *const Tokenizer, alloc: std.mem.Allocator, ids: []const u32) ![][]const u8 {
+        const out = try alloc.alloc([]const u8, ids.len);
+        for (ids, 0..) |id, i| out[i] = self.idToToken(id) orelse "";
+        return out;
+    }
+
+    /// Return the parallel `[]u8` mask where 1 = id is in added_tokens
+    /// (special / control) and 0 = id is a regular model token. Useful
+    /// for masking out special tokens before downstream processing.
+    pub fn specialTokensMask(self: *const Tokenizer, alloc: std.mem.Allocator, ids: []const u32) ![]u8 {
+        const out = try alloc.alloc(u8, ids.len);
+        for (ids, 0..) |id, i| {
+            out[i] = if (self.added_token_by_id.contains(id)) 1 else 0;
+        }
+        return out;
     }
 
     /// Encode a sentence-pair with sub-token offsets for each token
@@ -2810,6 +2857,41 @@ test "encodeBatchParallel — produces same output as encodeBatch (4 threads)" {
 
     try testing.expectEqual(seq.len, par.len);
     for (seq, par) |s, p| try testing.expectEqualSlices(u32, s, p);
+}
+
+test "idToToken + tokens + specialTokensMask" {
+    const json =
+        \\{
+        \\  "version": "1.0",
+        \\  "added_tokens": [{"id": 100, "content": "<unk>"}, {"id": 101, "content": "<s>"}],
+        \\  "pre_tokenizer": {"type": "ByteLevel"},
+        \\  "model": {
+        \\    "type": "BPE",
+        \\    "vocab": {"a": 0, "b": 1, "c": 2},
+        \\    "merges": []
+        \\  }
+        \\}
+    ;
+    var tok = try fromJson(testing.allocator, json);
+    defer tok.deinit();
+
+    try testing.expectEqualStrings("a", tok.idToToken(0).?);
+    try testing.expectEqualStrings("<unk>", tok.idToToken(100).?);
+    try testing.expectEqualStrings("<s>", tok.idToToken(101).?);
+    try testing.expect(tok.idToToken(999) == null);
+
+    const ids = [_]u32{ 101, 0, 1, 100, 2 };
+    const strs = try tok.tokens(testing.allocator, &ids);
+    defer testing.allocator.free(strs);
+    try testing.expectEqualStrings("<s>", strs[0]);
+    try testing.expectEqualStrings("a", strs[1]);
+    try testing.expectEqualStrings("b", strs[2]);
+    try testing.expectEqualStrings("<unk>", strs[3]);
+    try testing.expectEqualStrings("c", strs[4]);
+
+    const mask = try tok.specialTokensMask(testing.allocator, &ids);
+    defer testing.allocator.free(mask);
+    try testing.expectEqualSlices(u8, &[_]u8{ 1, 0, 0, 1, 0 }, mask);
 }
 
 test "encodeBatchParallelWithOffsets — matches sequential output (4 threads)" {

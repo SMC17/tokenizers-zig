@@ -1,7 +1,19 @@
 # STATUS
 
-**Version:** v0.22
+**Version:** v0.23
 **Last update:** 2026-05-22
+
+## What landed in v0.23 (on top of v0.22)
+
+- **`Model.idToToken(id)`** per-variant lookup.
+- **`Tokenizer.idToToken(id)`** with added_tokens check.
+- **`Tokenizer.tokens(ids)`** parallel array of vocab strings.
+- **`Tokenizer.specialTokensMask(ids)`** mask of added-token positions.
+
+Canonical HF return surface now complete: ids + type_ids +
+attention_mask + offsets + sequence_ids + tokens + special_tokens_mask.
+
+184 tests pass.
 
 ## What landed in v0.22 (on top of v0.21)
 

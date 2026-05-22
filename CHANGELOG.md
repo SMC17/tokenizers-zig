@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.23.0 — 2026-05-22
+
+idToToken + tokens + specialTokensMask — full HF-style introspection
+API. 184 tests pass.
+
+### Introspection
+
+- `Model.idToToken(id) → ?[]const u8` — implemented per-variant
+  (BPE iterates vocab map; WordPiece uses id_to_token; Unigram uses
+  tokens array).
+- `Tokenizer.idToToken(id)` checks added_tokens first (returns content
+  verbatim for special tokens), then falls through to model lookup.
+- `Tokenizer.tokens(ids) → [][]const u8` — parallel array of vocab
+  strings for downstream display / debugging.
+- `Tokenizer.specialTokensMask(ids) → []u8` — 1 if id is in
+  added_tokens (special / control), 0 if regular model token.
+
+Together these complete the canonical HF Encoding return surface:
+ids + type_ids + attention_mask + offsets + sequence_ids + tokens +
+special_tokens_mask.
+
+### Test count
+
+184 tests pass.
+
 ## 0.22.0 — 2026-05-22
 
 Pair encode with offsets — complete BERT-NSP + NER use case.
