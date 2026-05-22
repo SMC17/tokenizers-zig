@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.10.0 — 2026-05-22
+
+Attention mask return. Completes the canonical HF EncodeResult surface
+(ids + type_ids + attention_mask). 145 tests pass.
+
+### attention_mask
+
+- `EncodeResult` extended with `attention_mask: []u8`.
+- 1 for real tokens, 0 for padding tokens — matches HF Rust output
+  exactly.
+- Truncation/padding pipeline updated to apply to all three arrays
+  in lockstep (`applyTruncPadTriple` replaces `applyTruncPadParallel`).
+- Verified:
+  - Without padding: all-1s mask of `ids.len`.
+  - Right padding: `[1, 1, ..., 0, 0]`.
+  - Left padding: `[0, 0, ..., 1, 1]`.
+- Real BERT pair encodePairWithTypes("hello", "world") now returns:
+  - ids = [101, 7592, 102, 2088, 102]
+  - type_ids = [0, 0, 0, 1, 1]
+  - attention_mask = [1, 1, 1, 1, 1]
+
+### Test count
+
+145 tests pass.
+
 ## 0.9.0 — 2026-05-22
 
 Token type IDs (BERT segment markers) return. 143 tests pass.

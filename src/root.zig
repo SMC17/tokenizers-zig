@@ -86,16 +86,20 @@ pub const TemplateOp = struct {
     };
 };
 
-/// Encoded output with token-type IDs. `type_ids[i]` is the BERT-style
-/// segment marker for `ids[i]` (0 for sequence A, 1 for sequence B by
-/// convention). Caller frees both slices via `EncodeResult.deinit`.
+/// Encoded output bundle. Mirrors HF tokenizers' canonical return:
+///   - `ids`: token IDs
+///   - `type_ids`: BERT segment markers (0 = A, 1 = B by convention)
+///   - `attention_mask`: 1 for real tokens, 0 for padding tokens
+/// Caller frees all slices via `EncodeResult.deinit`.
 pub const EncodeResult = struct {
     ids: []u32,
     type_ids: []u8,
+    attention_mask: []u8,
 
     pub fn deinit(self: EncodeResult, alloc: std.mem.Allocator) void {
         alloc.free(self.ids);
         alloc.free(self.type_ids);
+        alloc.free(self.attention_mask);
     }
 };
 
@@ -421,12 +425,17 @@ pub const Tokenizer = struct {
             try types_out.appendNTimes(alloc, 1, b.len);
         }
 
-        // Truncation + padding apply symmetrically to both arrays.
-        try applyTruncPadParallel(alloc, &ids_out, &types_out, self);
+        // Build attention_mask (all 1s pre-padding); apply truncation +
+        // padding symmetrically.
+        var mask_out: std.ArrayList(u8) = .empty;
+        errdefer mask_out.deinit(alloc);
+        try mask_out.appendNTimes(alloc, 1, ids_out.items.len);
+        try applyTruncPadTriple(alloc, &ids_out, &types_out, &mask_out, self);
 
         return .{
             .ids = try ids_out.toOwnedSlice(alloc),
             .type_ids = try types_out.toOwnedSlice(alloc),
+            .attention_mask = try mask_out.toOwnedSlice(alloc),
         };
     }
 
@@ -459,11 +468,15 @@ pub const Tokenizer = struct {
             try types_out.appendNTimes(alloc, 0, base.len);
         }
 
-        try applyTruncPadParallel(alloc, &ids_out, &types_out, self);
+        var mask_out: std.ArrayList(u8) = .empty;
+        errdefer mask_out.deinit(alloc);
+        try mask_out.appendNTimes(alloc, 1, ids_out.items.len);
+        try applyTruncPadTriple(alloc, &ids_out, &types_out, &mask_out, self);
 
         return .{
             .ids = try ids_out.toOwnedSlice(alloc),
             .type_ids = try types_out.toOwnedSlice(alloc),
+            .attention_mask = try mask_out.toOwnedSlice(alloc),
         };
     }
 
@@ -1213,12 +1226,14 @@ fn parsePreTokenizer(
     // Unknown pre-tokenizer types are silently skipped (degrade gracefully).
 }
 
-/// Apply truncation + padding to ids + parallel type_ids arrays. Both
-/// arrays receive the same operations so they stay aligned.
-fn applyTruncPadParallel(
+/// Apply truncation + padding to ids + type_ids + attention_mask
+/// arrays in lockstep. Padding type_ids are 0 and padding attention
+/// mask bits are 0 (marking padding for downstream consumers).
+fn applyTruncPadTriple(
     alloc: std.mem.Allocator,
     ids: *std.ArrayList(u32),
     types: *std.ArrayList(u8),
+    mask: *std.ArrayList(u8),
     tok: *const Tokenizer,
 ) !void {
     if (tok.max_length) |mx| {
@@ -1227,13 +1242,16 @@ fn applyTruncPadParallel(
                 .right => {
                     ids.shrinkRetainingCapacity(mx);
                     types.shrinkRetainingCapacity(mx);
+                    mask.shrinkRetainingCapacity(mx);
                 },
                 .left => {
                     const drop = ids.items.len - mx;
                     std.mem.copyForwards(u32, ids.items[0..mx], ids.items[drop..]);
                     std.mem.copyForwards(u8, types.items[0..mx], types.items[drop..]);
+                    std.mem.copyForwards(u8, mask.items[0..mx], mask.items[drop..]);
                     ids.shrinkRetainingCapacity(mx);
                     types.shrinkRetainingCapacity(mx);
+                    mask.shrinkRetainingCapacity(mx);
                 },
             }
         }
@@ -1245,22 +1263,28 @@ fn applyTruncPadParallel(
                 .right => {
                     try ids.ensureUnusedCapacity(alloc, need);
                     try types.ensureUnusedCapacity(alloc, need);
+                    try mask.ensureUnusedCapacity(alloc, need);
                     for (0..need) |_| {
                         ids.appendAssumeCapacity(tok.pad_token_id);
                         types.appendAssumeCapacity(0);
+                        mask.appendAssumeCapacity(0); // padding has mask=0
                     }
                 },
                 .left => {
                     try ids.ensureTotalCapacity(alloc, pl);
                     try types.ensureTotalCapacity(alloc, pl);
+                    try mask.ensureTotalCapacity(alloc, pl);
                     const old_len = ids.items.len;
                     ids.items.len = pl;
                     types.items.len = pl;
+                    mask.items.len = pl;
                     std.mem.copyBackwards(u32, ids.items[need..], ids.items[0..old_len]);
                     std.mem.copyBackwards(u8, types.items[need..], types.items[0..old_len]);
+                    std.mem.copyBackwards(u8, mask.items[need..], mask.items[0..old_len]);
                     for (0..need) |i| {
                         ids.items[i] = tok.pad_token_id;
                         types.items[i] = 0;
+                        mask.items[i] = 0;
                     }
                 },
             }
@@ -2055,6 +2079,7 @@ test "encodePairWithTypes — BERT-style synthetic produces canonical type_ids" 
     // type_ids: [0,        0,    0,         1,      1]
     try testing.expectEqualSlices(u32, &[_]u32{ 101, 0, 102, 1, 102 }, result.ids);
     try testing.expectEqualSlices(u8, &[_]u8{ 0, 0, 0, 1, 1 }, result.type_ids);
+    try testing.expectEqualSlices(u8, &[_]u8{ 1, 1, 1, 1, 1 }, result.attention_mask);
 }
 
 test "encodeWithTypes — single sequence emits all-zero type_ids by default" {
@@ -2072,6 +2097,47 @@ test "encodeWithTypes — single sequence emits all-zero type_ids by default" {
     defer result.deinit(testing.allocator);
     try testing.expectEqualSlices(u32, &[_]u32{ 0, 1 }, result.ids);
     try testing.expectEqualSlices(u8, &[_]u8{ 0, 0 }, result.type_ids);
+    try testing.expectEqualSlices(u8, &[_]u8{ 1, 1 }, result.attention_mask);
+}
+
+test "encodeWithTypes — padding has attention_mask=0" {
+    const json =
+        \\{
+        \\  "version": "1.0",
+        \\  "pre_tokenizer": {"type": "ByteLevel"},
+        \\  "model": {"type": "BPE", "vocab": {"a": 0, "b": 1}, "merges": []}
+        \\}
+    ;
+    var tok = try fromJson(testing.allocator, json);
+    defer tok.deinit();
+    tok.pad_to_length = 5;
+    tok.pad_token_id = 99;
+
+    const result = try tok.encodeWithTypes(testing.allocator, "ab");
+    defer result.deinit(testing.allocator);
+    try testing.expectEqualSlices(u32, &[_]u32{ 0, 1, 99, 99, 99 }, result.ids);
+    try testing.expectEqualSlices(u8, &[_]u8{ 0, 0, 0, 0, 0 }, result.type_ids);
+    try testing.expectEqualSlices(u8, &[_]u8{ 1, 1, 0, 0, 0 }, result.attention_mask);
+}
+
+test "encodeWithTypes — left-padding shifts attention_mask correctly" {
+    const json =
+        \\{
+        \\  "version": "1.0",
+        \\  "pre_tokenizer": {"type": "ByteLevel"},
+        \\  "model": {"type": "BPE", "vocab": {"a": 0, "b": 1}, "merges": []}
+        \\}
+    ;
+    var tok = try fromJson(testing.allocator, json);
+    defer tok.deinit();
+    tok.pad_to_length = 5;
+    tok.pad_token_id = 99;
+    tok.padding_direction = .left;
+
+    const result = try tok.encodeWithTypes(testing.allocator, "ab");
+    defer result.deinit(testing.allocator);
+    try testing.expectEqualSlices(u32, &[_]u32{ 99, 99, 99, 0, 1 }, result.ids);
+    try testing.expectEqualSlices(u8, &[_]u8{ 0, 0, 0, 1, 1 }, result.attention_mask);
 }
 
 test "Decoder Sequence — Replace + ByteFallback + Strip applied in order" {

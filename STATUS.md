@@ -1,7 +1,17 @@
 # STATUS
 
-**Version:** v0.9
+**Version:** v0.10
 **Last update:** 2026-05-22
+
+## What landed in v0.10 (on top of v0.9)
+
+- **attention_mask return** completes the canonical HF EncodeResult
+  surface. `ids + type_ids + attention_mask` parallel arrays, in
+  lockstep through truncation + padding.
+- Padding rows are now 0 across attention_mask (downstream models
+  use this to ignore them during attention).
+
+145 tests pass.
 
 ## What landed in v0.9 (on top of v0.8)
 
