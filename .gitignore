@@ -4,6 +4,8 @@ zig-out/
 __pycache__/
 *.pyc
 tests/fixtures/tokenizer.json
+tests/fixtures/bert-base-uncased-tokenizer.json
+tests/fixtures/t5-base-tokenizer.json
 bench/bench_rust/target/
 bench/bench_rust/Cargo.lock
 .DS_Store

@@ -7,6 +7,27 @@ families. Portfolio artifact #4b of the 8-artifact jaw-drop portfolio.
 
 ## Status
 
+**v0.3 — real BERT-base-uncased + T5-base integration tests pass
+against canonical HF token IDs.** BertNormalizer + BertPreTokenizer +
+ASCII lowercase + per-piece Metaspace for T5-style Sequence
+pre-tokenizers. Model-type inference for older HF tokenizer.json format
+(BERT / T5 omit `model.type`).
+
+### Real-tokenizer canonical IDs verified
+
+- **bert-base-uncased** (30522 vocab, WordPiece): hello=7592, world=2088,
+  ","=1010, "!"=999. Added: [PAD]=0, [UNK]=100, [CLS]=101, [SEP]=102,
+  [MASK]=103.
+- **t5-base** (32100 vocab, Unigram): ▁hello=21820. Added: <pad>=0,
+  </s>=1, <unk>=2, <extra_id_0>=32099, <extra_id_99>=32000.
+- **TinyLlama-1.1B** (32000 vocab, BPE+SentencePiece): "Hello, how are
+  you today?" → [15043, 29892, 920, 526, 366, 9826, 29973].
+
+All three model families now have a downloaded real-tokenizer fixture
+test running on every `zig build test` (skip if fixture absent).
+
+78 unit + integration tests pass.
+
 **v0.2 — three model families + priority-queue BPE merge + added_tokens
 end-to-end.**
 

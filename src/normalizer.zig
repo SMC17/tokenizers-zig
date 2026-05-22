@@ -32,6 +32,9 @@ pub const NormalizerKind = union(enum) {
     prepend: []const u8,
     replace: struct { pattern: []const u8, content: []const u8 },
     sequence: []const NormalizerKind,
+    /// ASCII lowercase (a-z → A-Z mapping). Bytes outside ASCII pass
+    /// through unchanged. Full Unicode lowercase is v0.4 work.
+    lowercase: void,
 };
 
 /// Apply a normalizer to UTF-8 input. Caller frees output.
@@ -54,6 +57,11 @@ pub fn apply(alloc: std.mem.Allocator, norm: NormalizerKind, input: []const u8) 
                 current = next;
             }
             return current;
+        },
+        .lowercase => {
+            const out = try alloc.alloc(u8, input.len);
+            for (input, 0..) |b, i| out[i] = std.ascii.toLower(b);
+            return out;
         },
     };
 }
@@ -142,4 +150,17 @@ test "empty input survives" {
     const r = try apply(testing.allocator, .{ .prepend = "X" }, "");
     defer testing.allocator.free(r);
     try testing.expectEqualStrings("X", r);
+}
+
+test "lowercase ASCII works" {
+    const r = try apply(testing.allocator, .lowercase, "Hello, World!");
+    defer testing.allocator.free(r);
+    try testing.expectEqualStrings("hello, world!", r);
+}
+
+test "lowercase passes non-ASCII through unchanged" {
+    const r = try apply(testing.allocator, .lowercase, "Café É");
+    defer testing.allocator.free(r);
+    // ASCII lowercase: 'C' → 'c', 'a', 'f', non-ASCII é stays, ' ', non-ASCII É stays
+    try testing.expectEqualStrings("café É", r);
 }

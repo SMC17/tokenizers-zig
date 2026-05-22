@@ -79,6 +79,9 @@ pub const Tokenizer = struct {
     use_byte_level: bool,
     /// True if pre-tokenizer is Whitespace-style (BERT WordPiece).
     use_whitespace_split: bool,
+    /// True if pre-tokenizer is BertPreTokenizer — split on whitespace AND
+    /// on punctuation (each punctuation char becomes its own token).
+    split_on_punctuation: bool,
     /// Metaspace replacement char (SentencePiece "▁"). When set, spaces
     /// in input are replaced by this string before model.encode, and
     /// decode does the inverse.
@@ -150,15 +153,34 @@ pub const Tokenizer = struct {
     }
 
     /// Encode a single chunk of text (no added-token splitting) through the
-    /// full normalize → metaspace → model pipeline.
+    /// full normalize → (metaspace) → model pipeline.
     fn encodeChunk(self: *Tokenizer, alloc: std.mem.Allocator, text: []const u8) ![]u32 {
-        // Step 1: normalize (Sequence/Prepend/Replace on the raw text)
+        // Step 1: normalize.
         const normalized = try normalizer.apply(alloc, self.normalizer, text);
         defer alloc.free(normalized);
 
-        // Step 2: apply Metaspace replacement if configured (Unigram + Metaspace).
-        // The replacement is "spaces → ▁" applied to the whole text, plus a
-        // canonical leading-▁ prepend (matching HF Metaspace default).
+        // Unigram + WhitespaceSplit + Metaspace (T5 Sequence pattern): split
+        // on whitespace BEFORE metaspace; prepend metaspace to each piece;
+        // Viterbi each piece. This matches HF's per-piece pre-tokenization.
+        if (self.model == .unigram and self.use_whitespace_split and self.metaspace_replacement != null) {
+            const rep = self.metaspace_replacement.?;
+            var out: std.ArrayList(u32) = .empty;
+            errdefer out.deinit(alloc);
+            var piece_buf: std.ArrayList(u8) = .empty;
+            defer piece_buf.deinit(alloc);
+            var it = std.mem.tokenizeAny(u8, normalized, " \t\r\n");
+            while (it.next()) |piece| {
+                piece_buf.clearRetainingCapacity();
+                try piece_buf.appendSlice(alloc, rep);
+                try piece_buf.appendSlice(alloc, piece);
+                const ids = try self.model.unigram.encode(alloc, piece_buf.items);
+                defer alloc.free(ids);
+                try out.appendSlice(alloc, ids);
+            }
+            return out.toOwnedSlice(alloc);
+        }
+
+        // Otherwise: apply Metaspace (if any) to the whole text and proceed.
         const metaspaced: []u8 = if (self.metaspace_replacement) |rep| blk: {
             const replaced = try normalizer.apply(
                 alloc,
@@ -166,7 +188,6 @@ pub const Tokenizer = struct {
                 normalized,
             );
             defer alloc.free(replaced);
-            // Prepend the replacement if not already present at start
             if (std.mem.startsWith(u8, replaced, rep)) {
                 break :blk try alloc.dupe(u8, replaced);
             }
@@ -177,7 +198,6 @@ pub const Tokenizer = struct {
         } else try alloc.dupe(u8, normalized);
         defer alloc.free(metaspaced);
 
-        // Step 3: model-specific encoding.
         switch (self.model) {
             .bpe => |*m| {
                 if (self.use_byte_level) {
@@ -188,14 +208,17 @@ pub const Tokenizer = struct {
                 return m.encode(alloc, metaspaced);
             },
             .wordpiece => |*m| {
-                // Whitespace-split into words; encode each word; concat IDs.
                 var out: std.ArrayList(u32) = .empty;
                 errdefer out.deinit(alloc);
                 var it = std.mem.tokenizeAny(u8, metaspaced, " \t\r\n");
-                while (it.next()) |word| {
-                    const ids = try m.encode(alloc, word);
-                    defer alloc.free(ids);
-                    try out.appendSlice(alloc, ids);
+                while (it.next()) |chunk| {
+                    if (self.split_on_punctuation) {
+                        try encodePunctSplit(alloc, m, &out, chunk);
+                    } else {
+                        const ids = try m.encode(alloc, chunk);
+                        defer alloc.free(ids);
+                        try out.appendSlice(alloc, ids);
+                    }
                 }
                 return out.toOwnedSlice(alloc);
             },
@@ -304,29 +327,44 @@ pub fn fromJson(alloc: std.mem.Allocator, json_bytes: []const u8) !Tokenizer {
     if (parsed != .object) return Error.InvalidTokenizerJson;
     const root = parsed.object;
 
-    // Pre-tokenizer (ByteLevel / Whitespace / Metaspace / Sequence)
+    // Pre-tokenizer (ByteLevel / Whitespace / Bert / Metaspace / Sequence)
     var use_byte_level = false;
     var use_whitespace_split = false;
+    var split_on_punctuation = false;
     var metaspace_replacement: ?[]const u8 = null;
     if (root.get("pre_tokenizer")) |pt| {
         if (pt == .object) {
-            try parsePreTokenizer(aa, pt.object, &use_byte_level, &use_whitespace_split, &metaspace_replacement);
+            try parsePreTokenizer(aa, pt.object, &use_byte_level, &use_whitespace_split, &metaspace_replacement, &split_on_punctuation);
         }
     }
 
-    // Model
+    // Model. If `model.type` is missing (older HF format, e.g. BERT-base),
+    // infer from structural fields:
+    //   - `merges` present                       → BPE
+    //   - `continuing_subword_prefix` present    → WordPiece
+    //   - `vocab` is an array                    → Unigram
     const model_v = root.get("model") orelse return Error.MissingField;
     if (model_v != .object) return Error.InvalidTokenizerJson;
     const model_o = model_v.object;
-    const model_type = model_o.get("type") orelse return Error.MissingField;
-    if (model_type != .string) return Error.InvalidTokenizerJson;
+
+    const inferred_type: []const u8 = blk: {
+        if (model_o.get("type")) |tv| {
+            if (tv == .string) break :blk tv.string;
+        }
+        if (model_o.contains("merges")) break :blk "BPE";
+        if (model_o.contains("continuing_subword_prefix")) break :blk "WordPiece";
+        if (model_o.get("vocab")) |vv| {
+            if (vv == .array) break :blk "Unigram";
+        }
+        return Error.MissingField;
+    };
 
     var model: Model = undefined;
-    if (std.mem.eql(u8, model_type.string, "BPE")) {
+    if (std.mem.eql(u8, inferred_type, "BPE")) {
         model = .{ .bpe = try parseBpe(alloc, aa, model_o) };
-    } else if (std.mem.eql(u8, model_type.string, "WordPiece")) {
+    } else if (std.mem.eql(u8, inferred_type, "WordPiece")) {
         model = .{ .wordpiece = try parseWordPiece(alloc, aa, model_o) };
-    } else if (std.mem.eql(u8, model_type.string, "Unigram")) {
+    } else if (std.mem.eql(u8, inferred_type, "Unigram")) {
         model = .{ .unigram = try parseUnigram(alloc, aa, model_o) };
     } else {
         return Error.UnsupportedModelType;
@@ -370,6 +408,7 @@ pub fn fromJson(alloc: std.mem.Allocator, json_bytes: []const u8) !Tokenizer {
         .model = model,
         .use_byte_level = use_byte_level,
         .use_whitespace_split = use_whitespace_split,
+        .split_on_punctuation = split_on_punctuation,
         .metaspace_replacement = metaspace_replacement,
         .normalizer = norm_kind,
         .sp_space_marker = sp_marker,
@@ -384,6 +423,7 @@ fn parsePreTokenizer(
     byte_level_out: *bool,
     whitespace_out: *bool,
     metaspace_out: *?[]const u8,
+    punct_split_out: *bool,
 ) !void {
     const tv = obj.get("type") orelse return;
     if (tv != .string) return;
@@ -393,8 +433,13 @@ fn parsePreTokenizer(
         byte_level_out.* = true;
         return;
     }
-    if (std.mem.eql(u8, t, "Whitespace") or std.mem.eql(u8, t, "WhitespaceSplit") or std.mem.eql(u8, t, "BertPreTokenizer")) {
+    if (std.mem.eql(u8, t, "Whitespace") or std.mem.eql(u8, t, "WhitespaceSplit")) {
         whitespace_out.* = true;
+        return;
+    }
+    if (std.mem.eql(u8, t, "BertPreTokenizer")) {
+        whitespace_out.* = true;
+        punct_split_out.* = true;
         return;
     }
     if (std.mem.eql(u8, t, "Metaspace")) {
@@ -413,13 +458,57 @@ fn parsePreTokenizer(
             if (arr == .array) {
                 for (arr.array.items) |item| {
                     if (item == .object) {
-                        try parsePreTokenizer(aa, item.object, byte_level_out, whitespace_out, metaspace_out);
+                        try parsePreTokenizer(aa, item.object, byte_level_out, whitespace_out, metaspace_out, punct_split_out);
                     }
                 }
             }
         }
     }
     // Unknown pre-tokenizer types are silently skipped (degrade gracefully).
+}
+
+/// ASCII punctuation classifier matching BertPreTokenizer behaviour for
+/// the ASCII range. Full Unicode "P" category is v0.4 work.
+fn isAsciiPunct(b: u8) bool {
+    return switch (b) {
+        '!', '"', '#', '$', '%', '&', '\'', '(', ')', '*', '+', ',', '-', '.', '/' => true,
+        ':', ';', '<', '=', '>', '?', '@' => true,
+        '[', '\\', ']', '^', '_', '`' => true,
+        '{', '|', '}', '~' => true,
+        else => false,
+    };
+}
+
+/// Encode a single whitespace-chunk into ids, splitting on punctuation.
+/// Each maximal run of non-punctuation ASCII (and any UTF-8 byte ≥ 0x80)
+/// becomes a "word" passed to WordPiece; each ASCII punctuation byte
+/// becomes its own single-char word.
+fn encodePunctSplit(
+    alloc: std.mem.Allocator,
+    m: *const wordpiece.Model,
+    out: *std.ArrayList(u32),
+    chunk: []const u8,
+) !void {
+    var word_start: usize = 0;
+    var i: usize = 0;
+    while (i < chunk.len) : (i += 1) {
+        if (isAsciiPunct(chunk[i])) {
+            if (i > word_start) {
+                const ids = try m.encode(alloc, chunk[word_start..i]);
+                defer alloc.free(ids);
+                try out.appendSlice(alloc, ids);
+            }
+            const ids = try m.encode(alloc, chunk[i .. i + 1]);
+            defer alloc.free(ids);
+            try out.appendSlice(alloc, ids);
+            word_start = i + 1;
+        }
+    }
+    if (word_start < chunk.len) {
+        const ids = try m.encode(alloc, chunk[word_start..]);
+        defer alloc.free(ids);
+        try out.appendSlice(alloc, ids);
+    }
 }
 
 fn parseBpe(
@@ -602,6 +691,20 @@ fn parseNormalizer(
             sub_norms[i] = try parseNormalizer(aa, item.object, sp_marker_out);
         }
         return .{ .sequence = sub_norms };
+    }
+    if (std.mem.eql(u8, t, "Lowercase")) {
+        return .lowercase;
+    }
+    if (std.mem.eql(u8, t, "BertNormalizer")) {
+        // BertNormalizer config: clean_text, handle_chinese_chars,
+        // strip_accents, lowercase. v0.3 supports lowercase only;
+        // clean_text + chinese_chars + strip_accents are no-ops.
+        var do_lower = true; // HF default
+        if (obj.get("lowercase")) |lv| {
+            if (lv == .bool) do_lower = lv.bool;
+        }
+        if (do_lower) return .lowercase;
+        return .none;
     }
     return .none;
 }

@@ -1,7 +1,27 @@
 # STATUS
 
-**Version:** v0.2
+**Version:** v0.3
 **Last update:** 2026-05-21
+
+## What landed in v0.3 (on top of v0.2)
+
+- **BertNormalizer** parser → `.lowercase` normalizer (ASCII).
+  Defaults to lowercase=true matching HF behaviour.
+- **BertPreTokenizer** with ASCII punctuation splitting — each
+  punctuation char becomes its own WordPiece word.
+- **Model-type inference** when missing (older HF format). BPE if
+  `merges`, WordPiece if `continuing_subword_prefix`, Unigram if
+  `vocab` is an array.
+- **Per-piece Metaspace** for Unigram + WhitespaceSplit + Metaspace
+  Sequence (T5 pattern). Splits BEFORE Metaspace.
+- **`tests/test_real_bert.zig`** — 7 tests against real
+  bert-base-uncased (30522 vocab, WordPiece). Canonical IDs verified:
+  hello=7592, [CLS]=101, [SEP]=102, etc.
+- **`tests/test_real_t5.zig`** — 5 tests against real t5-base (32100
+  vocab, Unigram). Canonical IDs verified: ▁hello=21820, <pad>=0,
+  </s>=1, <extra_id_0>=32099.
+
+78 unit + integration tests pass.
 
 ## What landed in v0.2 (on top of v0.1)
 

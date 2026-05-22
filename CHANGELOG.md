@@ -1,5 +1,65 @@
 # Changelog
 
+## 0.3.0 — 2026-05-21
+
+Real BERT-base-uncased + T5-base integration tests pass against
+canonical HF token IDs. BertNormalizer + BertPreTokenizer + lowercase +
+Sequence(WhitespaceSplit, Metaspace) per-piece dispatch.
+
+### Pipeline
+
+- **BertNormalizer parser** in `src/root.zig::parseNormalizer` — maps
+  to the new `.lowercase` normalizer (`clean_text`, `handle_chinese_chars`,
+  `strip_accents` are no-ops at v0.3). Defaults to lowercase=true matching
+  HF behaviour.
+- **`.lowercase` normalizer variant** in `src/normalizer.zig` —
+  ASCII-only lowercase (`a–z ← A–Z`); non-ASCII passes through. Full
+  Unicode lowercase is v0.4 work.
+- **BertPreTokenizer punctuation splitting** — `BertPreTokenizer` now
+  sets both `use_whitespace_split` and `split_on_punctuation`. Each
+  whitespace-chunk is further split on ASCII punctuation
+  (`!"#$%&'()*+,-./:;<=>?@[\]^_\`{|}~`); each punctuation char becomes
+  its own one-char "word" for WordPiece. Full Unicode "P" category is
+  v0.4 work.
+- **Model-type inference** when `model.type` is missing (older HF
+  tokenizer.json format used by BERT-base-uncased, T5-base):
+  - `merges` field present → BPE
+  - `continuing_subword_prefix` field present → WordPiece
+  - `vocab` is an array → Unigram
+- **Per-piece Metaspace** for Unigram + WhitespaceSplit + Metaspace
+  Sequence (T5 pattern). Splits text on whitespace BEFORE Metaspace;
+  prepends ▁ to each piece individually; Viterbi-encodes each piece
+  separately. Caught by the T5 integration test on "hello </s>"
+  where whole-text Metaspace would have emitted a spurious trailing ▁.
+
+### Real-tokenizer integration tests
+
+- **`tests/test_real_bert.zig`** — 7 tests against the real
+  bert-base-uncased tokenizer.json (466 KB, 30522 vocab, WordPiece).
+  Verified canonical IDs: hello=7592, world=2088, ","=1010, "!"=999,
+  added_tokens [PAD]=0, [UNK]=100, [CLS]=101, [SEP]=102, [MASK]=103.
+- **`tests/test_real_t5.zig`** — 5 tests against the real t5-base
+  tokenizer.json (1.4 MB, 32100 vocab, Unigram). Verified canonical IDs:
+  ▁hello=21820, added_tokens <pad>=0, </s>=1, <unk>=2, <extra_id_0>=32099,
+  <extra_id_99>=32000.
+
+### Test count
+
+78 unit + integration tests pass.
+
+### Known non-claims for v0.3
+
+- BertPreTokenizer punctuation splitting is ASCII-only. Full Unicode
+  "P" category (e.g. `「」`, `—`) is unimplemented.
+- `.lowercase` normalizer is ASCII-only. Non-ASCII uppercase (e.g.
+  `É → é`) passes through unchanged. Affects BERT-multilingual.
+- BertNormalizer `clean_text` (BOM/zero-width strip),
+  `handle_chinese_chars`, `strip_accents` are parsed-but-ignored.
+- Precompiled-charsmap normalizer (T5 / mT5 / XLM-R) degrades to
+  none. Affects multilingual T5 on non-ASCII inputs.
+- The HF Rust crate has WordPiece + Unigram benches we don't yet match
+  (no head-to-head for these models; only BPE has the head-to-head).
+
 ## 0.2.0 — 2026-05-21
 
 Three model families (BPE + WordPiece + Unigram), priority-queue BPE
