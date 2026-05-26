@@ -3,7 +3,6 @@
 Zig 0.16 tokenizers compatible with the HuggingFace `tokenizer.json`
 format. Covers BPE (GPT-2 / Llama / Qwen / Mistral), WordPiece (BERT /
 DistilBERT), and Unigram (T5 / mBART / XLM-R) model families.
-Portfolio artifact #4b in the broader sovereign-stack portfolio.
 
 ## Status
 
