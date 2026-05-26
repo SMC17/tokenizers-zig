@@ -480,34 +480,42 @@ pub const Tokenizer = struct {
     }
 
     /// One-shot pair encode returning the full canonical HF `Encoding`
-    /// with sequence_ids populated.
+    /// with sequence_ids populated. Uses encodePairWithOffsets as the
+    /// single source of truth for ids + offsets + sequence_ids (which
+    /// guarantees alignment); derives type_ids from sequence_ids and
+    /// attention_mask from the resulting length.
     pub fn encodePairFull(self: *Tokenizer, alloc: std.mem.Allocator, text_a: []const u8, text_b: []const u8) !Encoding {
-        const types_r = try self.encodePairWithTypes(alloc, text_a, text_b);
-        errdefer types_r.deinit(alloc);
-
         const pair_off_r = try self.encodePairWithOffsets(alloc, text_a, text_b);
+        // Take ownership of all three slices (the deinit at end would
+        // free them; we move them into Encoding instead).
+        const ids = pair_off_r.ids;
+        const offsets = pair_off_r.offsets;
+        const sequence_ids = pair_off_r.sequence_ids;
+        // Don't call pair_off_r.deinit — we transferred ownership.
 
-        // pair_off_r.ids should equal types_r.ids by construction (same
-        // template). Use its offsets + sequence_ids directly.
-        const offsets_copy = try alloc.dupe(TokenOffset, pair_off_r.offsets);
-        errdefer alloc.free(offsets_copy);
-        const seq_ids_copy = try alloc.dupe(u8, pair_off_r.sequence_ids);
-        errdefer alloc.free(seq_ids_copy);
-        pair_off_r.deinit(alloc);
+        // type_ids mirrors sequence_ids (HF convention: token_type_ids
+        // for pair tasks IS the sequence indicator).
+        const type_ids = try alloc.dupe(u8, sequence_ids);
+        errdefer alloc.free(type_ids);
 
-        const toks = try self.tokens(alloc, types_r.ids);
+        // attention_mask: all 1s (no padding applied at this level).
+        const attention_mask = try alloc.alloc(u8, ids.len);
+        @memset(attention_mask, 1);
+        errdefer alloc.free(attention_mask);
+
+        const toks = try self.tokens(alloc, ids);
         errdefer alloc.free(toks);
-        const sp_mask = try self.specialTokensMask(alloc, types_r.ids);
+        const sp_mask = try self.specialTokensMask(alloc, ids);
         errdefer alloc.free(sp_mask);
 
         return .{
-            .ids = types_r.ids,
-            .type_ids = types_r.type_ids,
-            .attention_mask = types_r.attention_mask,
-            .offsets = offsets_copy,
+            .ids = ids,
+            .type_ids = type_ids,
+            .attention_mask = attention_mask,
+            .offsets = offsets,
             .tokens = toks,
             .special_tokens_mask = sp_mask,
-            .sequence_ids = seq_ids_copy,
+            .sequence_ids = sequence_ids,
         };
     }
 
@@ -633,20 +641,25 @@ pub const Tokenizer = struct {
     ) !void {
         const chunk_text = text[start..end];
         if (self.model == .wordpiece and self.use_whitespace_split) {
-            // Sub-word offset tracking via wordpiece.encodeWithOffsets:
-            // each piece gets its true byte range within the word, and
-            // we shift to absolute positions in `text`.
+            // Apply normalize first (BertNormalizer: lowercase + strip
+            // accents + ...). For BERT-uncased the byte mapping is 1:1
+            // (ASCII letters lowercase to single-byte equivalents), so
+            // offsets in normalized space equal those in the original
+            // chunk. For normalizers that change byte counts the
+            // offsets become approximate.
+            const normalized = try normalizer.apply(alloc, self.normalizer, chunk_text);
+            defer alloc.free(normalized);
+
             var i: usize = 0;
-            while (i < chunk_text.len) {
-                while (i < chunk_text.len and isWhitespaceByte(chunk_text[i])) i += 1;
+            while (i < normalized.len) {
+                while (i < normalized.len and isWhitespaceByte(normalized[i])) i += 1;
                 const word_start = i;
-                while (i < chunk_text.len and !isWhitespaceByte(chunk_text[i])) i += 1;
+                while (i < normalized.len and !isWhitespaceByte(normalized[i])) i += 1;
                 const word_end = i;
                 if (word_end > word_start) {
-                    const word = chunk_text[word_start..word_end];
+                    const word = normalized[word_start..word_end];
                     const abs_word_start: u32 = @intCast(start + word_start);
                     if (self.split_on_punctuation) {
-                        // Walk punctuation-split sub-chunks within the word.
                         try encodeWordPunctSplitWithOffsets(self, alloc, word, abs_word_start, ids_out, off_out);
                     } else {
                         const r = try self.model.wordpiece.encodeWithOffsets(alloc, word);

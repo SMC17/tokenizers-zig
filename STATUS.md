@@ -395,8 +395,8 @@ Consumer Linux, ReleaseFast. Variance across machines and runs.
   fixture, same correctness. Published as README headline.
 - WordPiece and Unigram pass unit + synthetic-tokenizer.json tests but
   no real BERT-base / T5-base tokenizer.json has been exercised yet.
-- Pre-1.0 substrate per Zig 0.16 ecosystem convention. No
-  "production-grade" / "v1.0" / "stable" claims.
+- Pre-1.0 substrate per Zig 0.16 ecosystem convention. Claims stay below
+  release-readiness language.
 - Tested on x86_64-linux only.
 
 ## Position in portfolio
