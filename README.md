@@ -158,7 +158,7 @@ pass.
 ## Comparable upstream
 
 - [`huggingface/tokenizers`](https://github.com/huggingface/tokenizers)
-  — Rust canonical with Python + Node bindings. Production-grade,
+  — Rust canonical with Python + Node bindings. Widely deployed,
   hand-tuned, covers all model types. Reference for correctness; the
   per-family head-to-head benches above run against this.
 
@@ -168,9 +168,8 @@ AGPL-3.0-or-later. See `LICENSE`.
 
 ## Honest non-claims
 
-- **Pre-1.0 substrate** per the Zig 0.16 ecosystem convention. No
-  "production-grade" / "v1.0" / "stable" claims will be made until
-  the language and stdlib hit 1.0.
+- **Pre-1.0 substrate** per the Zig 0.16 ecosystem convention. Claims stay
+  below release-readiness language until the language and stdlib hit 1.0.
 - **Special-token attributes are partially honoured.** `special:
   true/false` flag is used; `single_word`, `lstrip`, `rstrip`,
   `normalized` flags are parsed but not all enforced.
@@ -182,4 +181,4 @@ AGPL-3.0-or-later. See `LICENSE`.
   against a 123-byte fixture; on longer documents the absolute ratio
   shifts (the constant-factor overhead of HF's Rust crate amortises),
   but the architectural win (no GIL, no Python boundary, no
-  ICU-via-FFI for normalization) is stable.
+  ICU-via-FFI for normalization) is expected to persist.

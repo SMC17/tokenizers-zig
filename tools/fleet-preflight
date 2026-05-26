@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# Run the local agent-fleet G1 smoke against this repo.
+
+set -euo pipefail
+
+repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+agent_fleet="${AGENT_FLEET_DIR:-/home/stax/agent-fleet}"
+
+if [[ ! -x "$agent_fleet/fleet-smoke" ]]; then
+  echo "fleet-preflight: missing executable $agent_fleet/fleet-smoke" >&2
+  exit 3
+fi
+
+exec "$agent_fleet/fleet-smoke" --repo "$repo" --mode local "$@"

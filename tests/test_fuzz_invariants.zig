@@ -62,15 +62,13 @@ fn checkInvariants(tok: *tokenizers.Tokenizer, alloc: std.mem.Allocator, text: [
         try std.testing.expect(off.start <= text.len);
         try std.testing.expect(off.end <= text.len);
         try std.testing.expect(off.start <= off.end);
-        // Monotonic: each offset's start must be >= previous offset's end
-        // (or both can be 0,0 for added tokens / synthetic).
         if (off.start != 0 or off.end != 0) {
             try std.testing.expect(off.start >= prev_end);
             prev_end = off.end;
         }
     }
 
-    // encodeFull path — all parallel arrays aligned
+    // encodeFull — all parallel arrays aligned
     const enc = try tok.encodeFull(alloc, text);
     defer enc.deinit(alloc);
     try std.testing.expectEqual(enc.ids.len, enc.type_ids.len);
@@ -79,9 +77,56 @@ fn checkInvariants(tok: *tokenizers.Tokenizer, alloc: std.mem.Allocator, text: [
     try std.testing.expectEqual(enc.ids.len, enc.tokens.len);
     try std.testing.expectEqual(enc.ids.len, enc.special_tokens_mask.len);
 
-    // Decode must succeed (no panic / no error).
+    // Cross-method id consistency: encode + encodeFull + encodeWithTypes
+    // should all produce the same id sequence.
+    const plain = try tok.encode(alloc, text);
+    defer alloc.free(plain);
+    try std.testing.expectEqualSlices(u32, enc.ids, plain);
+
+    const types_r = try tok.encodeWithTypes(alloc, text);
+    defer types_r.deinit(alloc);
+    try std.testing.expectEqualSlices(u32, enc.ids, types_r.ids);
+    try std.testing.expectEqualSlices(u8, enc.type_ids, types_r.type_ids);
+    try std.testing.expectEqualSlices(u8, enc.attention_mask, types_r.attention_mask);
+
+    // Decode must succeed.
     const decoded = try tok.decode(alloc, enc.ids);
     defer alloc.free(decoded);
+}
+
+fn checkPairInvariants(tok: *tokenizers.Tokenizer, alloc: std.mem.Allocator, text_a: []const u8, text_b: []const u8) !void {
+    if (tok.template_pair == null) return; // skip if no pair template
+
+    const enc = try tok.encodePairFull(alloc, text_a, text_b);
+    defer enc.deinit(alloc);
+
+    // All parallel arrays same length
+    try std.testing.expectEqual(enc.ids.len, enc.type_ids.len);
+    try std.testing.expectEqual(enc.ids.len, enc.attention_mask.len);
+    try std.testing.expectEqual(enc.ids.len, enc.offsets.len);
+    try std.testing.expectEqual(enc.ids.len, enc.tokens.len);
+    try std.testing.expectEqual(enc.ids.len, enc.special_tokens_mask.len);
+    try std.testing.expect(enc.sequence_ids != null);
+    try std.testing.expectEqual(enc.ids.len, enc.sequence_ids.?.len);
+
+    // sequence_ids contains only 0 or 1
+    for (enc.sequence_ids.?) |s| try std.testing.expect(s <= 1);
+
+    // Pair encode + encodePair should produce the same ids
+    const pair_ids = try tok.encodePair(alloc, text_a, text_b);
+    defer alloc.free(pair_ids);
+    try std.testing.expectEqualSlices(u32, enc.ids, pair_ids);
+}
+
+fn checkBatchInvariants(tok: *tokenizers.Tokenizer, alloc: std.mem.Allocator, texts: []const []const u8) !void {
+    // Sequential vs parallel batch encode produce identical output
+    const seq = try tok.encodeBatch(alloc, texts);
+    defer tokenizers.Tokenizer.freeBatch(alloc, seq);
+    const par = try tok.encodeBatchParallel(alloc, texts, 4);
+    defer tokenizers.Tokenizer.freeBatch(alloc, par);
+
+    try std.testing.expectEqual(seq.len, par.len);
+    for (seq, par) |s, p| try std.testing.expectEqualSlices(u32, s, p);
 }
 
 test "fuzz — BERT-base-uncased invariants over 200 random texts" {
@@ -147,5 +192,63 @@ test "fuzz — TinyLlama invariants over 200 random texts" {
             std.debug.print("\nfuzz failure on text: {s}\n", .{text});
             return err;
         };
+    }
+}
+
+test "fuzz — BERT pair encodePairFull invariants over 100 pairs" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    const maybe_tok = loadTokenizer(alloc, io, "tests/fixtures/bert-base-uncased-tokenizer.json") catch return;
+    var tok = maybe_tok orelse return error.SkipZigTest;
+    defer tok.deinit();
+
+    var prng = std.Random.DefaultPrng.init(0xBEEFCAFE);
+    var rng = prng.random();
+    var buf_a: [128]u8 = undefined;
+    var buf_b: [128]u8 = undefined;
+
+    var i: usize = 0;
+    while (i < 100) : (i += 1) {
+        const a = randomAsciiText(&rng, &buf_a);
+        const b = randomAsciiText(&rng, &buf_b);
+        checkPairInvariants(&tok, alloc, a, b) catch |err| {
+            std.debug.print("\npair fuzz failure on a={s} b={s}\n", .{ a, b });
+            return err;
+        };
+    }
+}
+
+test "fuzz — sequential vs parallel batch identical (BERT, 50 batches)" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    const maybe_tok = loadTokenizer(alloc, io, "tests/fixtures/bert-base-uncased-tokenizer.json") catch return;
+    var tok = maybe_tok orelse return error.SkipZigTest;
+    defer tok.deinit();
+
+    var prng = std.Random.DefaultPrng.init(0x10010);
+    var rng = prng.random();
+    var buf: [128]u8 = undefined;
+
+    // Generate 50 different batches of varying size
+    var batch_i: usize = 0;
+    while (batch_i < 50) : (batch_i += 1) {
+        const batch_size = rng.intRangeAtMost(usize, 2, 10);
+        const texts = try alloc.alloc([]u8, batch_size);
+        defer {
+            for (texts) |t| alloc.free(t);
+            alloc.free(texts);
+        }
+        for (texts) |*t| {
+            const tx = randomAsciiText(&rng, &buf);
+            t.* = try alloc.dupe(u8, tx);
+        }
+
+        const texts_const = try alloc.alloc([]const u8, batch_size);
+        defer alloc.free(texts_const);
+        for (texts, 0..) |t, i| texts_const[i] = t;
+
+        try checkBatchInvariants(&tok, alloc, texts_const);
     }
 }
