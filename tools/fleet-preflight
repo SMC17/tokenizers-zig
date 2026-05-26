@@ -4,11 +4,12 @@
 set -euo pipefail
 
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-agent_fleet="${AGENT_FLEET_DIR:-/home/stax/agent-fleet}"
 
-if [[ ! -x "$agent_fleet/fleet-smoke" ]]; then
-  echo "fleet-preflight: missing executable $agent_fleet/fleet-smoke" >&2
+if command -v fleet-smoke >/dev/null 2>&1; then
+  exec fleet-smoke --repo "$repo" --mode local "$@"
+elif [[ -n "${AGENT_FLEET_DIR:-}" && -x "${AGENT_FLEET_DIR}/fleet-smoke" ]]; then
+  exec "${AGENT_FLEET_DIR}/fleet-smoke" --repo "$repo" --mode local "$@"
+else
+  echo "fleet-preflight: 'fleet-smoke' not on PATH and AGENT_FLEET_DIR unset" >&2
   exit 3
 fi
-
-exec "$agent_fleet/fleet-smoke" --repo "$repo" --mode local "$@"
