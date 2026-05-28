@@ -1,0 +1,23 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+type: software
+title: "tokenizers-zig: Pure-Zig HuggingFace tokenizers"
+abstract: "BPE / WordPiece / Unigram with full HF Encoding parity, sub-token offsets, ~5x faster than HF Rust on WordPiece. 189 tests + 600-iter property fuzz. AGPL-3.0."
+authors:
+  - family-names: Collins
+    given-names: Sean
+    email: sean@sunlitmoon.online
+    affiliation: independent
+url: "https://github.com/SMC17/tokenizers-zig"
+repository-code: "https://github.com/SMC17/tokenizers-zig"
+version: "0.26.0"
+date-released: "2026-05-22"
+license: AGPL-3.0-or-later
+keywords:
+  - zig
+  - tokenizer
+  - bpe
+  - wordpiece
+  - unigram
+  - huggingface
+  - nlp
