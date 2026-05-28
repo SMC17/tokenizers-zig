@@ -154,10 +154,7 @@ tokenize info        <tokenizer.json>                 # model / vocab / config
 
 ## Siblings
 
-The companion repos that compose into an end-to-end inference path:
-
 - [`SMC17/safetensors-zig`](https://github.com/SMC17/safetensors-zig) — HuggingFace safetensors weight loader.
-- [`SMC17/vllm-zig`](https://github.com/SMC17/vllm-zig) — Zig LLM serving substrate consuming this tokenizer + safetensors-zig weights.
 
 ## Comparable upstream
 

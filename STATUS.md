@@ -402,7 +402,5 @@ Consumer Linux, ReleaseFast. Variance across machines and runs.
 ## Siblings
 
 tokenizers-zig pairs with [SMC17/safetensors-zig](https://github.com/SMC17/safetensors-zig)
-as the HuggingFace micro-library siblings. Together they make
-[SMC17/vllm-zig](https://github.com/SMC17/vllm-zig) viable
-end-to-end: tokenizers-zig text→IDs, safetensors-zig weight
-loading, vllm-zig forward pass.
+as the HuggingFace micro-library siblings: tokenizers-zig text→IDs,
+safetensors-zig weight loading.
