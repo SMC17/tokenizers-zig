@@ -6,9 +6,10 @@ DistilBERT), and Unigram (T5 / mBART / XLM-R) model families.
 
 ## Status
 
-**v0.14 — full pipeline, all three model families, 6-subcommand
-tokenize CLI, batch-with-types APIs, expanded Unicode normalization.
-163 tests pass.**
+**v0.26 — full pipeline, all three model families, 6-subcommand
+tokenize CLI, batch-with-types APIs, full HF `Encoding` struct
+parity, sub-token offsets, property-fuzz-tested. 189 tests pass
++ 600-iter invariant fuzz clean on all 3 real-tokenizer fixtures.**
 
 ### Head-to-head vs HuggingFace Rust tokenizers
 
@@ -40,7 +41,7 @@ running on every `zig build test` (skipped if fixture absent):
 - **TinyLlama-1.1B** (32000 vocab, BPE+SentencePiece): "Hello, how are
   you today?" → [15043, 29892, 920, 526, 366, 9826, 29973].
 
-## What's covered (v0.13)
+## What's covered
 
 ### Models
 - **BPE** with priority-queue O(n log n) merge loop (vocab + merges;
@@ -128,7 +129,8 @@ Same code works against BPE, WordPiece, or Unigram tokenizer.json —
 ## Build
 
 ```sh
-zig build test                              # 163 unit + integration tests
+zig build test                              # 189 tests + 600-iter property fuzz
+zig build test-fuzz                          # standalone fuzz (BERT/T5/TinyLlama × 200 random texts)
 zig build tokenize                          # build tokenize CLI (6 subcommands)
 zig build bench                             # synthetic encode throughput
 zig build bench-real-tinyllama              # real Llama tokenizer encode bench
@@ -145,14 +147,12 @@ tokenize decode      <tokenizer.json> "<ids,csv>"     # decode IDs → text
 tokenize info        <tokenizer.json>                 # model / vocab / config
 ```
 
-## Position in the portfolio
+## Siblings
 
-tokenizers-zig is artifact #4b in the broader sovereign-stack
-portfolio. It pairs with safetensors-zig (artifact #4a) as the two
-HuggingFace micro-library siblings; together they make vllm-zig
-(artifact #1) viable end-to-end: tokenizers-zig handles text→IDs,
-safetensors-zig loads the model weights, vllm-zig runs the forward
-pass.
+The companion repos that compose into an end-to-end inference path:
+
+- [`SMC17/safetensors-zig`](https://github.com/SMC17/safetensors-zig) — HuggingFace safetensors weight loader.
+- [`SMC17/vllm-zig`](https://github.com/SMC17/vllm-zig) — Zig LLM serving substrate consuming this tokenizer + safetensors-zig weights.
 
 ## Comparable upstream
 

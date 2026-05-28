@@ -399,9 +399,10 @@ Consumer Linux, ReleaseFast. Variance across machines and runs.
   release-readiness language.
 - Tested on x86_64-linux only.
 
-## Position in portfolio
+## Siblings
 
-tokenizers-zig pairs with safetensors-zig (artifact #4a) as the HF
-micro-library siblings. Together they make vllm-zig (artifact #1)
-viable end-to-end: tokenizers-zig text→IDs, safetensors-zig weight
+tokenizers-zig pairs with [SMC17/safetensors-zig](https://github.com/SMC17/safetensors-zig)
+as the HuggingFace micro-library siblings. Together they make
+[SMC17/vllm-zig](https://github.com/SMC17/vllm-zig) viable
+end-to-end: tokenizers-zig text→IDs, safetensors-zig weight
 loading, vllm-zig forward pass.
