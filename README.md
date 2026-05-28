@@ -1,5 +1,10 @@
 # tokenizers-zig
 
+[![CI](https://github.com/SMC17/tokenizers-zig/actions/workflows/ci.yml/badge.svg)](https://github.com/SMC17/tokenizers-zig/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/SMC17/tokenizers-zig?sort=semver)](https://github.com/SMC17/tokenizers-zig/releases)
+[![License: AGPL-3.0-or-later](https://img.shields.io/badge/License-AGPL--3.0--or--later-blue.svg)](LICENSE)
+[![Zig](https://img.shields.io/badge/Zig-0.16-orange.svg)](https://ziglang.org/)
+
 Zig 0.16 tokenizers compatible with the HuggingFace `tokenizer.json`
 format. Covers BPE (GPT-2 / Llama / Qwen / Mistral), WordPiece (BERT /
 DistilBERT), and Unigram (T5 / mBART / XLM-R) model families.
