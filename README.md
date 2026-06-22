@@ -18,6 +18,8 @@ tokenize CLI, batch-with-types APIs, full HF `Encoding` struct
 parity, sub-token offsets, property-fuzz-tested. 189 tests pass
 + 600-iter invariant fuzz clean on all 3 real-tokenizer fixtures.**
 
+**Formal Proof:** [Bit-Identical Tokenization: Formal Verification and Systems Performance (PDF)](parity_proof.pdf)
+
 ### Head-to-head vs HuggingFace Rust tokenizers
 
 | Family | Zig | Rust HF 0.21 | Ratio |
