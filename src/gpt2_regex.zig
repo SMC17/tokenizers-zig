@@ -45,10 +45,17 @@ fn isAsciiWhitespace(b: u8) bool {
 fn isUnicodeLetter(cp: u21) bool {
     return switch (cp) {
         'A'...'Z', 'a'...'z' => true,
-        0x00C0...0x00D6 => true, // Latin-1 uppercase letters
-        0x00D8...0x00F6 => true, // continues
-        0x00F8...0x00FF => true, // ÿ inclusive
-        0x0100...0x024F => true, // Latin Extended-A and -B (broad)
+        0x00C0...0x00D6 => true, // Latin-1 uppercase
+        0x00D8...0x00F6 => true, // Latin-1 lowercase
+        0x00F8...0x02AF => true, // Latin Extended
+        0x0370...0x03FF => true, // Greek and Coptic
+        0x0400...0x04FF => true, // Cyrillic
+        0x0590...0x05FF => true, // Hebrew
+        0x0600...0x06FF => true, // Arabic
+        0x3040...0x309F => true, // Hiragana
+        0x30A0...0x30FF => true, // Katakana
+        0x4E00...0x9FFF => true, // CJK Unified Ideographs (Common)
+        0xAC00...0xD7AF => true, // Hangul Syllables
         else => false,
     };
 }
@@ -235,6 +242,15 @@ test "split — Latin-1 letters classified correctly" {
     try testing.expectEqual(@as(usize, 2), chunks.len);
     try testing.expectEqualStrings("café", chunks[0]);
     try testing.expectEqualStrings(" résumé", chunks[1]);
+}
+
+test "split — CJK and Cyrillic characters classified correctly" {
+    const chunks = try split(testing.allocator, "你好 mir привет");
+    defer testing.allocator.free(chunks);
+    try testing.expectEqual(@as(usize, 3), chunks.len);
+    try testing.expectEqualStrings("你好", chunks[0]);
+    try testing.expectEqualStrings(" mir", chunks[1]);
+    try testing.expectEqualStrings(" привет", chunks[2]);
 }
 
 test "split — empty input returns no chunks" {

@@ -100,7 +100,12 @@ pub const Model = struct {
                 }
             }
             if (found) |s| {
-                try out.appendSlice(alloc, s);
+                if (std.mem.startsWith(u8, s, "▁")) {
+                    try out.append(alloc, ' ');
+                    try out.appendSlice(alloc, s[3..]);
+                } else {
+                    try out.appendSlice(alloc, s);
+                }
             } else {
                 return Error.UnknownToken;
             }
