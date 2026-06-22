@@ -28,7 +28,7 @@ Either: (a) run the cross-tokenizer reproducibility bench documented in FIXTURES
 - Public-surface repo — claim-scan PostToolUse hook fires on edits to this tree.
 ## producer-loop last run 2026-06-15T21:14:53-04:00
 - branch: main  level: 3  iters attempted: up to 3
-- next: inspect /home/stax/.local/state/stax/producer-inbox/2026-06-15.log for merges/halts
+- next: review the stax-producer-loop inbox for merges/halts
 ## producer-loop last run 2026-06-16T14:11:52-04:00
 - branch: main  level: 3  iters attempted: up to 2
-- next: inspect /home/stax/.local/state/stax/producer-inbox/2026-06-16.log for merges/reverts/noops
+- next: review the stax-producer-loop inbox for merges/reverts/noops
