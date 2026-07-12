@@ -222,6 +222,24 @@ fn decompose(cp: u21) ?[2]u21 {
         0x045E => .{ 0x0443, 0x0306 }, // ў
         0x0419 => .{ 0x0418, 0x0306 }, // Й
         0x0439 => .{ 0x0438, 0x0306 }, // й
+        // Vietnamese double-diacritic precomposed characters (tone mark
+        // + circumflex/horn). Real Unicode canonical decomposition is
+        // recursive here — e.g. "ệ" decomposes to "ẹ"+circumflex, and
+        // "ẹ" itself further decomposes to "e"+dot-below — which is
+        // why appendDecomposedRecursive (not a single decompose() call)
+        // is required. Intermediate single-diacritic bases (ẹ, ư, ơ)
+        // are added alongside since they didn't previously exist
+        // either. Scoped to exactly the codepoints verified against a
+        // differential corpus, not the full ~130-entry Vietnamese set.
+        0x1EED => .{ 0x01B0, 0x0309 }, // ử → ư + hook above
+        0x01B0 => .{ 0x0075, 0x031B }, // ư → u + horn
+        0x1EC7 => .{ 0x1EB9, 0x0302 }, // ệ → ẹ + circumflex
+        0x1EB9 => .{ 0x0065, 0x0323 }, // ẹ → e + dot below
+        0x1EBF => .{ 0x00EA, 0x0301 }, // ế → ê + acute
+        0x1EDB => .{ 0x01A1, 0x0301 }, // ớ → ơ + acute
+        0x01A1 => .{ 0x006F, 0x031B }, // ơ → o + horn
+        0x1EC1 => .{ 0x00EA, 0x0300 }, // ề → ê + grave
+        0x1EA5 => .{ 0x00E2, 0x0301 }, // ấ → â + acute
         // Hiragana dakuten/handakuten (U+3099/U+309A combining marks).
         // Needed for BertNormalizer.strip_accents to reproduce real HF
         // behavior on Japanese text — verified against a differential
@@ -543,6 +561,32 @@ fn composeHangulLVT(lv: u21, t: u21) ?u21 {
 /// NFD: decompose precomposed Latin / Greek / Cyrillic codepoints into
 /// base + combining mark, and Hangul Syllables algorithmically into
 /// L + V (+ T) Jamo. Codepoints not in our table pass through.
+/// Append the fully (recursively) canonically decomposed form of `cp`.
+/// Real Unicode canonical decomposition is recursive: a precomposed
+/// character's Decomposition_Mapping can itself be a further-
+/// decomposable precomposed character (e.g. Vietnamese "ệ" U+1EC7 →
+/// "ẹ"+circumflex, and "ẹ" U+1EB9 → "e"+dot-below — two hops to reach
+/// the base Latin letter). `decompose()`'s table only stores one
+/// level per entry; this recurses on the base (`pair[0]`) until no
+/// further decomposition applies. The combining mark (`pair[1]`) never
+/// itself decomposes further, so only the base needs the recursive
+/// call.
+fn appendDecomposedRecursive(out: *std.ArrayList(u8), alloc: std.mem.Allocator, cp: u21) !void {
+    var jamo: [3]u21 = undefined;
+    const j_count = decomposeHangul(cp, &jamo);
+    if (j_count > 0) {
+        var k: usize = 0;
+        while (k < j_count) : (k += 1) try appendCodepoint(out, alloc, jamo[k]);
+        return;
+    }
+    if (decompose(cp)) |pair| {
+        try appendDecomposedRecursive(out, alloc, pair[0]);
+        try appendCodepoint(out, alloc, pair[1]);
+    } else {
+        try appendCodepoint(out, alloc, cp);
+    }
+}
+
 pub fn nfd(alloc: std.mem.Allocator, input: []const u8) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(alloc);
@@ -559,18 +603,7 @@ pub fn nfd(alloc: std.mem.Allocator, input: []const u8) ![]u8 {
             i += n;
             continue;
         };
-        // Hangul first (algorithmic; no table lookup).
-        var jamo: [3]u21 = undefined;
-        const j_count = decomposeHangul(cp, &jamo);
-        if (j_count > 0) {
-            var k: usize = 0;
-            while (k < j_count) : (k += 1) try appendCodepoint(&out, alloc, jamo[k]);
-        } else if (decompose(cp)) |pair| {
-            try appendCodepoint(&out, alloc, pair[0]);
-            try appendCodepoint(&out, alloc, pair[1]);
-        } else {
-            try out.appendSlice(alloc, input[i..][0..n]);
-        }
+        try appendDecomposedRecursive(&out, alloc, cp);
         i += n;
     }
     return out.toOwnedSlice(alloc);
