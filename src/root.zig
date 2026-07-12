@@ -2474,6 +2474,18 @@ fn parseNormalizer(
         if (steps.items.len == 1) return steps.items[0];
         return .{ .sequence = try aa.dupe(normalizer.NormalizerKind, steps.items) };
     }
+    // "Precompiled" is SentencePiece's own binary-charsmap normalizer
+    // (used by every SentencePiece-based tokenizer.json: T5, mBART,
+    // ALBERT, XLNet, ...). It is not implemented here and falls
+    // through to `.none` below (no normalization applied) rather than
+    // erroring — hard-erroring was tried and reverted: it breaks
+    // loading T5 entirely (0/7 tests) for a model family where
+    // BertNormalizer-class fixes don't apply anyway, and where the
+    // encoder still produces mostly-correct output (36/39 on the
+    // differential corpus) despite the gap. Documented as an explicit
+    // known limitation in COMPATIBILITY.md rather than silently
+    // shipped — the honest fix here is documentation, not an API
+    // break that trades a working (if imperfect) T5 path for none.
     return .none;
 }
 
