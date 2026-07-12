@@ -2291,7 +2291,11 @@ fn parseBpe(
         }
     }
 
-    return bpe.build(alloc, vocab_entries.items, merges_entries.items, unk_id);
+    var model = try bpe.build(alloc, vocab_entries.items, merges_entries.items, unk_id);
+    if (model_o.get("byte_fallback")) |bf_v| {
+        if (bf_v == .bool) model.byte_fallback = bf_v.bool;
+    }
+    return model;
 }
 
 fn parseWordPiece(
@@ -2367,7 +2371,11 @@ fn parseUnigram(
         if (unk_v == .integer) unk_id = @intCast(unk_v.integer);
     }
 
-    return unigram.build(alloc, vocab_entries.items, unk_id, null);
+    var model = try unigram.build(alloc, vocab_entries.items, unk_id, null);
+    if (model_o.get("byte_fallback")) |bf_v| {
+        if (bf_v == .bool) model.byte_fallback = bf_v.bool;
+    }
+    return model;
 }
 
 fn parseNormalizer(

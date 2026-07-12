@@ -12,6 +12,8 @@ bench/bench_rust_bert/target/
 bench/bench_rust_bert/Cargo.lock
 bench/bench_rust_t5/target/
 bench/bench_rust_t5/Cargo.lock
+bench/diff_rust/target/
+bench/diff_rust/Cargo.lock
 .DS_Store
 *~
 *.swp

@@ -148,4 +148,23 @@ pub fn build(b: *std.Build) void {
         const bs = b.step(bench_spec[1], bench_spec[2]);
         bs.dependOn(&re.step);
     }
+
+    // Differential-correctness dump (Zig side of the exact-token-ID
+    // cross-check against bench/diff_rust — see scripts/diff_check.sh).
+    const diff_mod = b.createModule(.{
+        .root_source_file = b.path("bench/diff_dump.zig"),
+        .target = target,
+        .optimize = .ReleaseFast,
+    });
+    diff_mod.addImport("tokenizers", mod);
+    const diff_exe = b.addExecutable(.{
+        .name = "diff-dump",
+        .root_module = diff_mod,
+    });
+    b.installArtifact(diff_exe);
+    const run_diff = b.addRunArtifact(diff_exe);
+    run_diff.has_side_effects = true;
+    if (b.args) |args| run_diff.addArgs(args);
+    const diff_step = b.step("diff-dump", "Dump token IDs for a fixture+corpus (Zig side of differential test)");
+    diff_step.dependOn(&run_diff.step);
 }

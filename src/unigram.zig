@@ -53,6 +53,14 @@ pub const Model = struct {
     /// large negative number so unk is dispreferred when alternatives exist.
     /// Default = min(scores) - 10.0, set at build time.
     unk_score: f64,
+    /// SentencePiece byte-fallback (tokenizer.json `model.byte_fallback`).
+    /// When true, a single codepoint absent from the vocab is decomposed
+    /// into its UTF-8 bytes and each byte is looked up as a `<0xXX>`
+    /// vocab entry (present in every fixture that sets this flag) rather
+    /// than collapsing to a single `unk_id`. Matches HF Rust behavior:
+    /// with byte_fallback on, plain `unk_id` is never emitted for valid
+    /// UTF-8 input.
+    byte_fallback: bool = false,
 
     pub fn deinit(self: *Model) void {
         self.str_to_id.deinit();
@@ -60,6 +68,26 @@ pub const Model = struct {
         self.allocator.free(self.scores);
         self.arena.deinit();
         self.allocator.destroy(self.arena);
+    }
+
+    /// Look up the vocab id for the `<0xXX>` byte-fallback token
+    /// representing `byte`, if present.
+    fn byteTokenId(self: *const Model, byte: u8) ?u32 {
+        var buf: [6]u8 = undefined;
+        const s = std.fmt.bufPrint(&buf, "<0x{X:0>2}>", .{byte}) catch return null;
+        return self.str_to_id.get(s);
+    }
+
+    /// Sum of `<0xXX>` scores for every byte of `substr`, if all bytes
+    /// resolve to a vocab entry. Returns null otherwise (caller falls
+    /// back to plain unk).
+    fn byteFallbackScore(self: *const Model, substr: []const u8) ?f64 {
+        var total: f64 = 0.0;
+        for (substr) |b| {
+            const id = self.byteTokenId(b) orelse return null;
+            total += self.scores[id];
+        }
+        return total;
     }
 
     /// Encode + return per-token byte-offset ranges (in `text`'s byte
@@ -94,10 +122,13 @@ pub const Model = struct {
         defer alloc.free(back_prev);
         const back_id = try alloc.alloc(u32, n_chars + 1);
         defer alloc.free(back_id);
+        const back_is_bf = try alloc.alloc(bool, n_chars + 1);
+        defer alloc.free(back_is_bf);
 
         @memset(best, NEG_INF);
         @memset(back_prev, 0);
         @memset(back_id, 0);
+        @memset(back_is_bf, false);
         best[0] = 0.0;
 
         var end_pos: usize = 1;
@@ -110,18 +141,31 @@ pub const Model = struct {
                 const substr = text[b_start..b_end];
                 var step_score: f64 = undefined;
                 var step_id: u32 = undefined;
+                var step_is_bf = false;
                 if (self.str_to_id.get(substr)) |id| {
                     step_score = self.scores[id];
                     step_id = id;
                 } else if (end_pos - start_pos == 1) {
-                    step_score = self.unk_score;
-                    step_id = self.unk_id;
+                    if (self.byte_fallback) {
+                        if (self.byteFallbackScore(substr)) |bf_score| {
+                            step_score = bf_score;
+                            step_id = 0;
+                            step_is_bf = true;
+                        } else {
+                            step_score = self.unk_score;
+                            step_id = self.unk_id;
+                        }
+                    } else {
+                        step_score = self.unk_score;
+                        step_id = self.unk_id;
+                    }
                 } else continue;
                 const cand = best[start_pos] + step_score;
                 if (cand > best[end_pos]) {
                     best[end_pos] = cand;
                     back_prev[end_pos] = start_pos;
                     back_id[end_pos] = step_id;
+                    back_is_bf[end_pos] = step_is_bf;
                 }
             }
         }
@@ -135,6 +179,10 @@ pub const Model = struct {
         }
 
         // Trace back; reverse to forward order with parallel offsets.
+        // Byte-fallback pieces expand to multiple ids that each carry
+        // the *same* enclosing-codepoint offset span (SentencePiece
+        // convention: the original text has no sub-byte position of its
+        // own to assign each fallback token individually).
         var rev_ids: std.ArrayList(u32) = .empty;
         defer rev_ids.deinit(alloc);
         var rev_offs: std.ArrayList([2]u32) = .empty;
@@ -142,22 +190,48 @@ pub const Model = struct {
         var cur: usize = n_chars;
         while (cur > 0) {
             const j = back_prev[cur];
-            try rev_ids.append(alloc, back_id[cur]);
-            try rev_offs.append(alloc, .{
-                @intCast(boundaries.items[j]),
-                @intCast(boundaries.items[cur]),
-            });
+            const b_start = boundaries.items[j];
+            const b_end = boundaries.items[cur];
+            if (back_is_bf[cur]) {
+                const substr = text[b_start..b_end];
+                var bi: usize = substr.len;
+                while (bi > 0) {
+                    bi -= 1;
+                    try rev_ids.append(alloc, self.byteTokenId(substr[bi]) orelse self.unk_id);
+                    try rev_offs.append(alloc, .{ @intCast(b_start), @intCast(b_end) });
+                }
+            } else {
+                try rev_ids.append(alloc, back_id[cur]);
+                try rev_offs.append(alloc, .{ @intCast(b_start), @intCast(b_end) });
+            }
             cur = j;
         }
 
         const ids_out = try alloc.alloc(u32, rev_ids.items.len);
+        defer alloc.free(ids_out);
         const off_out = try alloc.alloc([2]u32, rev_offs.items.len);
+        defer alloc.free(off_out);
         var k: usize = 0;
         while (k < rev_ids.items.len) : (k += 1) {
             ids_out[k] = rev_ids.items[rev_ids.items.len - 1 - k];
             off_out[k] = rev_offs.items[rev_offs.items.len - 1 - k];
         }
-        return .{ .ids = ids_out, .offsets = off_out };
+
+        // Collapse consecutive unk_id runs (see collapseUnkRuns); merged
+        // offset spans the union of every collapsed piece.
+        var cids: std.ArrayList(u32) = .empty;
+        errdefer cids.deinit(alloc);
+        var coffs: std.ArrayList([2]u32) = .empty;
+        errdefer coffs.deinit(alloc);
+        for (ids_out, 0..) |id, idx| {
+            if (id == self.unk_id and idx > 0 and ids_out[idx - 1] == self.unk_id) {
+                coffs.items[coffs.items.len - 1][1] = off_out[idx][1];
+                continue;
+            }
+            try cids.append(alloc, id);
+            try coffs.append(alloc, off_out[idx]);
+        }
+        return .{ .ids = try cids.toOwnedSlice(alloc), .offsets = try coffs.toOwnedSlice(alloc) };
     }
 
     /// Encode an input string into token IDs by Viterbi-best segmentation.
@@ -183,15 +257,20 @@ pub const Model = struct {
         const best = try alloc.alloc(f64, n_chars + 1);
         defer alloc.free(best);
         // back_prev[i] = j such that best path to i comes from j
-        // back_id[i] = id of the piece input[b[j]..b[i]]
+        // back_id[i] = id of the piece input[b[j]..b[i]] (unused when
+        // back_is_bf[i] is set — that piece expands to multiple bytes,
+        // recomputed from text[b[j]..b[i]] at traceback time).
         const back_prev = try alloc.alloc(usize, n_chars + 1);
         defer alloc.free(back_prev);
         const back_id = try alloc.alloc(u32, n_chars + 1);
         defer alloc.free(back_id);
+        const back_is_bf = try alloc.alloc(bool, n_chars + 1);
+        defer alloc.free(back_is_bf);
 
         @memset(best, NEG_INF);
         @memset(back_prev, 0);
         @memset(back_id, 0);
+        @memset(back_is_bf, false);
         best[0] = 0.0;
 
         var end_pos: usize = 1;
@@ -205,13 +284,29 @@ pub const Model = struct {
 
                 var step_score: f64 = undefined;
                 var step_id: u32 = undefined;
+                var step_is_bf = false;
                 if (self.str_to_id.get(substr)) |id| {
                     step_score = self.scores[id];
                     step_id = id;
                 } else if (end_pos - start_pos == 1) {
-                    // Single-codepoint unknown — fall back to unk.
-                    step_score = self.unk_score;
-                    step_id = self.unk_id;
+                    // Single-codepoint unknown. Prefer SentencePiece
+                    // byte-fallback (per-byte <0xXX> vocab lookup) over
+                    // plain unk when the model has it — matches HF Rust,
+                    // which never emits unk_id for valid UTF-8 once
+                    // byte_fallback is on.
+                    if (self.byte_fallback) {
+                        if (self.byteFallbackScore(substr)) |bf_score| {
+                            step_score = bf_score;
+                            step_id = 0; // unused; expanded at traceback
+                            step_is_bf = true;
+                        } else {
+                            step_score = self.unk_score;
+                            step_id = self.unk_id;
+                        }
+                    } else {
+                        step_score = self.unk_score;
+                        step_id = self.unk_id;
+                    }
                 } else {
                     continue;
                 }
@@ -221,6 +316,7 @@ pub const Model = struct {
                     best[end_pos] = cand;
                     back_prev[end_pos] = start_pos;
                     back_id[end_pos] = step_id;
+                    back_is_bf[end_pos] = step_is_bf;
                 }
             }
         }
@@ -237,16 +333,46 @@ pub const Model = struct {
         defer rev.deinit(alloc);
         var cur: usize = n_chars;
         while (cur > 0) {
-            try rev.append(alloc, back_id[cur]);
-            cur = back_prev[cur];
+            const j = back_prev[cur];
+            if (back_is_bf[cur]) {
+                const b_start = boundaries.items[j];
+                const b_end = boundaries.items[cur];
+                const substr = text[b_start..b_end];
+                // Append in reverse byte order; the outer reversal below
+                // restores forward order.
+                var bi: usize = substr.len;
+                while (bi > 0) {
+                    bi -= 1;
+                    try rev.append(alloc, self.byteTokenId(substr[bi]) orelse self.unk_id);
+                }
+            } else {
+                try rev.append(alloc, back_id[cur]);
+            }
+            cur = j;
         }
 
         const out = try alloc.alloc(u32, rev.items.len);
+        defer alloc.free(out);
         var k: usize = 0;
         while (k < rev.items.len) : (k += 1) {
             out[k] = rev.items[rev.items.len - 1 - k];
         }
-        return out;
+        return self.collapseUnkRuns(alloc, out);
+    }
+
+    /// SentencePiece unk semantics: a maximal run of consecutive
+    /// `unk_id` tokens collapses into a single `unk_id` — verified
+    /// against HF Rust (a string of untokenizable codepoints, e.g. CJK
+    /// or Thai text absent byte-fallback, emits one `<unk>`, not one
+    /// per codepoint).
+    fn collapseUnkRuns(self: *const Model, alloc: std.mem.Allocator, ids: []const u32) ![]u32 {
+        var out: std.ArrayList(u32) = .empty;
+        errdefer out.deinit(alloc);
+        for (ids, 0..) |id, idx| {
+            if (id == self.unk_id and idx > 0 and ids[idx - 1] == self.unk_id) continue;
+            try out.append(alloc, id);
+        }
+        return out.toOwnedSlice(alloc);
     }
 
     /// Decode token IDs by concatenating token strings.
