@@ -149,11 +149,33 @@ pub fn applyWithOffsets(
             return .{ .output = current_out, .input_index = current_idx };
         },
         .lowercase => {
-            const out = try alloc.alloc(u8, input.len);
-            for (input, 0..) |b, i| out[i] = std.ascii.toLower(b);
-            const idx = try alloc.alloc(u32, input.len);
-            for (0..input.len) |i| idx[i] = @intCast(i);
-            return .{ .output = out, .input_index = idx };
+            var out: std.ArrayList(u8) = .empty;
+            errdefer out.deinit(alloc);
+            var idx: std.ArrayList(u32) = .empty;
+            errdefer idx.deinit(alloc);
+            var i: usize = 0;
+            while (i < input.len) {
+                const n = std.unicode.utf8ByteSequenceLength(input[i]) catch {
+                    try out.append(alloc, std.ascii.toLower(input[i]));
+                    try idx.append(alloc, @intCast(i));
+                    i += 1;
+                    continue;
+                };
+                if (i + n > input.len) return Error.InvalidUtf8;
+                const cp = std.unicode.utf8Decode(input[i..][0..n]) catch {
+                    try out.appendSlice(alloc, input[i..][0..n]);
+                    for (0..n) |_| try idx.append(alloc, @intCast(i));
+                    i += n;
+                    continue;
+                };
+                const lower_cp = toLowerCp(cp);
+                var buf: [4]u8 = undefined;
+                const enc_len = std.unicode.utf8Encode(lower_cp, &buf) catch unreachable;
+                try out.appendSlice(alloc, buf[0..enc_len]);
+                for (0..enc_len) |_| try idx.append(alloc, @intCast(i));
+                i += n;
+            }
+            return .{ .output = try out.toOwnedSlice(alloc), .input_index = try idx.toOwnedSlice(alloc) };
         },
         else => {
             // Unsupported normalizer for offset tracking: fall back to
@@ -198,9 +220,28 @@ pub fn apply(alloc: std.mem.Allocator, norm: NormalizerKind, input: []const u8) 
             return current;
         },
         .lowercase => {
-            const out = try alloc.alloc(u8, input.len);
-            for (input, 0..) |b, i| out[i] = std.ascii.toLower(b);
-            return out;
+            var out: std.ArrayList(u8) = .empty;
+            errdefer out.deinit(alloc);
+            var i: usize = 0;
+            while (i < input.len) {
+                const n = std.unicode.utf8ByteSequenceLength(input[i]) catch {
+                    try out.append(alloc, std.ascii.toLower(input[i]));
+                    i += 1;
+                    continue;
+                };
+                if (i + n > input.len) return Error.InvalidUtf8;
+                const cp = std.unicode.utf8Decode(input[i..][0..n]) catch {
+                    try out.appendSlice(alloc, input[i..][0..n]);
+                    i += n;
+                    continue;
+                };
+                const lower_cp = toLowerCp(cp);
+                var buf: [4]u8 = undefined;
+                const enc_len = std.unicode.utf8Encode(lower_cp, &buf) catch unreachable;
+                try out.appendSlice(alloc, buf[0..enc_len]);
+                i += n;
+            }
+            return out.toOwnedSlice(alloc);
         },
         .nfc => return unicode_norm.nfc(alloc, input),
         .nfd => return unicode_norm.nfd(alloc, input),
@@ -286,11 +327,27 @@ fn cleanText(alloc: std.mem.Allocator, input: []const u8) ![]u8 {
     return out.toOwnedSlice(alloc);
 }
 
+/// HF's real `is_control` is `char.is_other()` — the general Unicode
+/// category grouping Cc+Cf+Cn+Co (control/format/unassigned/private-use;
+/// see Unicode TR44 Table 12), not a hardcoded control-char range. Cc
+/// is fully covered below (identical to HF: C0 0x00-0x1F and C1
+/// 0x7F/0x80-0x9F, excluding tab/LF/CR). Cf is covered for the ranges
+/// that actually appear in real text (zero-width joiners/spaces, bidi
+/// controls, BOM, soft hyphen) — verified against a differential
+/// corpus that specifically exercises ZWSP/ZWNJ/ZWJ. Cn (unassigned)
+/// and rare Co (private-use) codepoints are not covered; a full
+/// Unicode category table is future work.
 fn isControl(cp: u21) bool {
     return switch (cp) {
         // Tab, LF, CR are whitespace per HF; explicitly exclude.
         0x00...0x08, 0x0B, 0x0C, 0x0E...0x1F => true,
         0x7F, 0x80...0x9F => true,
+        0x00AD => true, // Cf: soft hyphen
+        0x200B...0x200F => true, // Cf: ZWSP, ZWNJ, ZWJ, LRM, RLM
+        0x202A...0x202E => true, // Cf: bidi embedding/override controls
+        0x2060...0x2064 => true, // Cf: word joiner, invisible operators
+        0x2066...0x2069 => true, // Cf: bidi isolate controls
+        0xFEFF => true, // Cf: zero-width no-break space / BOM
         else => false,
     };
 }
@@ -307,8 +364,51 @@ fn isWhitespaceCp(cp: u21) bool {
     };
 }
 
-/// Strip Combining Diacritical Marks (U+0300–U+036F). All other code-
-/// points pass through unchanged. Typically applied after NFD so e.g.
+/// Unicode-aware lowercase for the scripts a differential-correctness
+/// pass against HF Rust found BertNormalizer actually lowercases
+/// beyond ASCII: Cyrillic and Greek. Codepoints outside these ranges
+/// (and ASCII, handled separately by std.ascii.toLower at the call
+/// site for single-byte input) pass through unchanged. Not a general
+/// Unicode case-folding table — full coverage is future work; this
+/// covers exactly the scripts verified against a real reference.
+fn toLowerCp(cp: u21) u21 {
+    return switch (cp) {
+        'A'...'Z' => cp + 0x20, // ASCII
+        0x0410...0x042F => cp + 0x20, // Cyrillic capital А-Я → а-я
+        0x0400...0x040F => cp + 0x50, // Cyrillic capital Ѐ-Џ → ѐ-џ
+        0x0391...0x03A1 => cp + 0x20, // Greek capital Α-Ρ → α-ρ
+        0x03A3...0x03A9 => cp + 0x20, // Greek capital Σ-Ω → σ-ω (skip unassigned 0x03A2)
+        else => cp,
+    };
+}
+
+/// HF's real `strip_accents` is `!c.is_mark_nonspacing()` — the
+/// general Unicode category Mn, not a hardcoded range. U+0300–U+036F
+/// (Combining Diacritical Marks) covers most Latin/Cyrillic/Greek
+/// accents. U+3099–U+309A (Combining Katakana-Hiragana Voiced/
+/// Semi-Voiced Sound Marks) is added here — verified against a
+/// differential corpus: BERT-uncased strips Japanese dakuten/handakuten
+/// via this exact path (NFD decomposes "で" to "て"+U+3099, then this
+/// step strips U+3099, matching real HF output). Other Mn-category
+/// ranges (Hebrew niqqud, Arabic harakat, Vietnamese tone marks, etc.)
+/// are not covered — not yet verified against a reference, so not
+/// claimed as fixed.
+fn isCombiningMark(cp: u21) bool {
+    return switch (cp) {
+        0x0300...0x036F => true,
+        0x3099...0x309A => true,
+        // Thai combining vowel/tone marks — verified against a
+        // differential corpus (สวัสดี → สวสด matches real HF exactly,
+        // confirming 0E31/0E34-0E3A/0E47-0E4E strip the same way).
+        0x0E31 => true,
+        0x0E34...0x0E3A => true,
+        0x0E47...0x0E4E => true,
+        else => false,
+    };
+}
+
+/// Strip combining marks per `isCombiningMark`. All other codepoints
+/// pass through unchanged. Typically applied after NFD so e.g.
 /// "é" → "e" + ◌́ → "e".
 fn stripAccents(alloc: std.mem.Allocator, input: []const u8) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
@@ -326,7 +426,7 @@ fn stripAccents(alloc: std.mem.Allocator, input: []const u8) ![]u8 {
             i += n;
             continue;
         };
-        if (cp >= 0x0300 and cp <= 0x036F) {
+        if (isCombiningMark(cp)) {
             // Skip combining mark
         } else {
             try out.appendSlice(alloc, input[i..][0..n]);

@@ -26,12 +26,16 @@ requires those fixtures.**
 **Differential correctness vs HF Rust — see [COMPATIBILITY.md](COMPATIBILITY.md).**
 `parity_proof.pdf` (2026-06-13) claims universal bit-identical parity;
 that claim is false — a 39-line adversarial corpus found real
-mismatches on all three model families (root-caused: SentencePiece
-byte-fallback was unimplemented, and Unigram never collapsed
-consecutive-unknown runs). Both are now fixed: TinyLlama went to
-39/39 exact match, T5 to 36/39. BERT/WordPiece is unchanged at 33/39
-— five real gaps involving CJK, Cyrillic, Vietnamese, and astral-plane
-input, not yet root-caused. Full detail, reproduction steps, and the
+mismatches on all three model families. Root-caused and fixed 5 bugs
+across two sessions: SentencePiece byte-fallback was unimplemented
+(TinyLlama → **39/39**); Unigram never collapsed consecutive-unknown
+runs (T5 → **36/39**); and BertNormalizer's lowercase was ASCII-only,
+its `clean_text` didn't strip zero-width joiners, and its NFD table had
+zero Hiragana/Katakana decomposition entries (BERT → **37/39**).
+2 BERT gaps (Vietnamese, a currency-line WordPiece match) and 3 T5
+gaps (T5 uses SentencePiece's separate `Precompiled`-charsmap
+normalizer, not BertNormalizer — different bug class, not yet
+investigated) remain open. Full detail, reproduction steps, and the
 open gaps are in COMPATIBILITY.md — read that before the PDF.
 
 ### Head-to-head vs HuggingFace Rust tokenizers
