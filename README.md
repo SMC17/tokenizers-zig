@@ -26,17 +26,20 @@ requires those fixtures.**
 **Differential correctness vs HF Rust — see [COMPATIBILITY.md](COMPATIBILITY.md).**
 `parity_proof.pdf` (2026-06-13) claims universal bit-identical parity;
 that claim is false — a 39-line adversarial corpus found real
-mismatches on all three model families. Root-caused and fixed 5 bugs
-across two sessions: SentencePiece byte-fallback was unimplemented
-(TinyLlama → **39/39**); Unigram never collapsed consecutive-unknown
-runs (T5 → **36/39**); and BertNormalizer's lowercase was ASCII-only,
-its `clean_text` didn't strip zero-width joiners, and its NFD table had
-zero Hiragana/Katakana decomposition entries (BERT → **37/39**).
-2 BERT gaps (Vietnamese, a currency-line WordPiece match) and 3 T5
-gaps (T5 uses SentencePiece's separate `Precompiled`-charsmap
-normalizer, not BertNormalizer — different bug class, not yet
-investigated) remain open. Full detail, reproduction steps, and the
-open gaps are in COMPATIBILITY.md — read that before the PDF.
+mismatches on all three model families. Root-caused and fixed 6 bugs:
+SentencePiece byte-fallback was unimplemented (TinyLlama → **39/39**);
+Unigram never collapsed consecutive-unknown runs (T5 → **36/39**); and
+BertNormalizer's lowercase was ASCII-only, its `clean_text` didn't
+strip zero-width joiners, its NFD table had zero Hiragana/Katakana
+decomposition entries, and NFD decomposition wasn't recursive (needed
+for Vietnamese's double-diacritic characters) (BERT → **38/39**).
+1 BERT gap (a currency-line WordPiece match, confirmed not a
+normalizer issue) and 3 T5 gaps (confirmed cause: T5 uses
+SentencePiece's separate `Precompiled`-charsmap normalizer, entirely
+unimplemented — falls through to a silent no-op rather than erroring,
+because erroring breaks loading T5 at all) remain open. Full detail,
+reproduction steps, and the open gaps are in COMPATIBILITY.md — read
+that before the PDF.
 
 ### Head-to-head vs HuggingFace Rust tokenizers
 
