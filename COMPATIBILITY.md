@@ -104,14 +104,23 @@ any mismatch — timing is not part of the pass criterion.
   "ệ" decomposes to "ê"+dot-below, and "ê" itself further decomposes to
   "e"+circumflex; the current NFD table appears to do single-level
   decomposition only). Not root-caused to the exact code path yet.
-- **T5/Unigram, 3 remaining mismatches**: NOT the same bug class as
-  BERT — T5's `tokenizer.json` specifies `"normalizer": {"type":
-  "Precompiled", "precompiled_charsmap": ...}`, SentencePiece's own
-  binary charsmap normalizer format, entirely separate from
-  BertNormalizer's Sequence-of-named-steps. None of the fixes above
-  touch this path. Whether Zig implements `Precompiled` at all (vs.
-  treating it as identity) is not yet checked — that's the next
-  question, not a normalizer-table gap like the BERT fixes above.
+- **T5/Unigram, 3 remaining mismatches — confirmed cause: `Precompiled`
+  is silently a no-op.** T5's `tokenizer.json` specifies
+  `"normalizer": {"type": "Precompiled", "precompiled_charsmap": ...}`
+  — SentencePiece's own binary-charsmap normalizer, entirely separate
+  from BertNormalizer's named-step Sequence, and not implemented here.
+  `parseNormalizer` (root.zig) falls through to `.none` for any
+  unrecognized type, so T5 loads and encodes with **zero normalization
+  applied** — no error, no warning. Tried making this a hard error for
+  `Precompiled` specifically (loud failure instead of silent wrong
+  output); reverted immediately because it breaks loading T5 entirely
+  (0/7 tests failed) for a model family — T5/mBART/ALBERT/XLNet — where
+  `Precompiled` is the *only* normalizer type that ever appears, not an
+  edge case. A working-but-imperfect T5 path (36/39 on the differential
+  corpus despite the gap) is more useful than none. The real fix is
+  implementing the Precompiled charsmap format (a compact double-array
+  trie), not erroring around not having it — that's a genuinely new,
+  bounded feature, not a small extension of the BERT fixes above.
 
 ## What this means for the README claims
 
