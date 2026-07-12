@@ -37,7 +37,7 @@ any mismatch — timing is not part of the pass criterion.
 |---|---|---|---|
 | TinyLlama-1.1B | BPE + SentencePiece | **39/39 (100%)** | 27/39 |
 | T5-base | Unigram | **36/39 (92%)** | 25/39 |
-| BERT-base-uncased | WordPiece | **37/39 (95%)** | 33/39 |
+| BERT-base-uncased | WordPiece | **38/39 (97%)** | 33/39 |
 
 ## Root causes found and fixed
 
@@ -93,17 +93,28 @@ any mismatch — timing is not part of the pass criterion.
    after diffing normalized Thai text found the exact stripped
    codepoints empirically rather than guessing from Unicode charts.
 
+6. **NFD decomposition was single-level; Vietnamese compound
+   diacritics need recursion.** Real Unicode canonical decomposition
+   is recursive by definition — a character's Decomposition_Mapping
+   can itself be a further-decomposable character. Vietnamese "ệ"
+   (U+1EC7) decomposes to "ẹ"+circumflex, and "ẹ" (U+1EB9) itself
+   further decomposes to "e"+dot-below; the old `nfd()` did exactly
+   one `decompose()` lookup per input codepoint, so "ẹ" was never
+   re-decomposed and `stripAccents` had nothing left to strip beyond
+   the outer mark. Made `nfd()` recursive (`appendDecomposedRecursive`)
+   and added the specific codepoints verified against the corpus (6
+   Vietnamese compound characters + 3 intermediate single-diacritic
+   bases they resolve through) — not the full ~130-entry Vietnamese
+   set. BERT went 37/39 → 38/39 on this fix alone.
+
 ## Known open gaps (not yet fixed)
 
-- **BERT/WordPiece, 2 remaining mismatches**: a currency/number line
+- **BERT/WordPiece, 1 remaining mismatch**: a currency/number line
   (£15.00 tail — normalized text is byte-identical between Zig and
-  Rust, so this is a genuine WordPiece greedy-match divergence, not a
-  normalizer issue) and Vietnamese (normalized text still differs —
-  Vietnamese precomposed characters need *recursive* NFD decomposition
-  to fully separate base letter + tone mark + circumflex/horn, e.g.
-  "ệ" decomposes to "ê"+dot-below, and "ê" itself further decomposes to
-  "e"+circumflex; the current NFD table appears to do single-level
-  decomposition only). Not root-caused to the exact code path yet.
+  Rust, so this is confirmed a genuine WordPiece greedy-match
+  divergence, not a normalizer issue). Not root-caused to the exact
+  code path yet — needs a WordPiece-algorithm trace, not normalizer
+  diffing.
 - **T5/Unigram, 3 remaining mismatches — confirmed cause: `Precompiled`
   is silently a no-op.** T5's `tokenizer.json` specifies
   `"normalizer": {"type": "Precompiled", "precompiled_charsmap": ...}`
