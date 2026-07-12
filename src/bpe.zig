@@ -45,12 +45,26 @@ pub const Model = struct {
     merges: std.StringHashMap(u32),
     /// unk_token: optional fallback. If null, UnknownToken error.
     unk_token: ?u32,
+    /// SentencePiece byte-fallback (tokenizer.json `model.byte_fallback`,
+    /// used by Llama/Mistral-family BPE, distinct from GPT-2 ByteLevel
+    /// pre-tokenization). When true, a codepoint absent from the vocab
+    /// is decomposed into its UTF-8 bytes and each byte is looked up as
+    /// a `<0xXX>` vocab entry rather than collapsing to `unk_token`.
+    byte_fallback: bool = false,
 
     pub fn deinit(self: *Model) void {
         self.vocab.deinit();
         self.merges.deinit();
         self.arena.deinit();
         self.allocator.destroy(self.arena);
+    }
+
+    /// Look up the vocab id for the `<0xXX>` byte-fallback token
+    /// representing `byte`, if present.
+    fn byteTokenId(self: *const Model, byte: u8) ?u32 {
+        var buf: [6]u8 = undefined;
+        const s = std.fmt.bufPrint(&buf, "<0x{X:0>2}>", .{byte}) catch return null;
+        return self.vocab.get(s);
     }
 
     /// Encode a ByteLevel-encoded string into token IDs. `word` is
@@ -144,6 +158,11 @@ const Node = struct {
     piece: []const u8,
     prev: i32, // -1 = head
     next: i32, // -1 = tail
+    /// Set when this node is a SentencePiece byte-fallback byte (`piece`
+    /// is a raw single byte, not a vocab-lookupable string). `bf_byte`
+    /// is the byte to look up via `<0xXX>` at output time.
+    is_bf: bool = false,
+    bf_byte: u8 = 0,
 };
 
 const HeapEntry = struct {
@@ -168,12 +187,31 @@ fn bpeEncodePQ(self: *const Model, alloc: std.mem.Allocator, word: []const u8) !
     while (i < word.len) {
         const n = try std.unicode.utf8ByteSequenceLength(word[i]);
         if (i + n > word.len) return error.InvalidUtf8;
-        const node_idx: i32 = @intCast(nodes.items.len);
-        try nodes.append(alloc, .{
-            .piece = word[i .. i + n],
-            .prev = node_idx - 1,
-            .next = node_idx + 1, // patched below
-        });
+        const cp = word[i .. i + n];
+        if (self.byte_fallback and self.vocab.get(cp) == null) {
+            // Byte-fallback: this codepoint isn't a vocab entry on its
+            // own — decompose into per-byte nodes so each byte can be
+            // looked up as `<0xXX>` at output time (matches HF Rust,
+            // which never collapses OOV UTF-8 to a single unk when
+            // byte_fallback is enabled).
+            for (cp) |b| {
+                const node_idx: i32 = @intCast(nodes.items.len);
+                try nodes.append(alloc, .{
+                    .piece = cp[0..1], // never matches a merge key; harmless
+                    .prev = node_idx - 1,
+                    .next = node_idx + 1,
+                    .is_bf = true,
+                    .bf_byte = b,
+                });
+            }
+        } else {
+            const node_idx: i32 = @intCast(nodes.items.len);
+            try nodes.append(alloc, .{
+                .piece = cp,
+                .prev = node_idx - 1,
+                .next = node_idx + 1, // patched below
+            });
+        }
         i += n;
     }
     if (nodes.items.len == 0) return alloc.alloc(u32, 0);
@@ -280,7 +318,15 @@ fn bpeEncodePQ(self: *const Model, alloc: std.mem.Allocator, word: []const u8) !
     // Walk forward
     while (cur_idx >= 0) {
         const node = nodes.items[@intCast(cur_idx)];
-        if (self.vocab.get(node.piece)) |id| {
+        if (node.is_bf) {
+            if (self.byteTokenId(node.bf_byte)) |id| {
+                try out.append(alloc, id);
+            } else if (self.unk_token) |unk| {
+                try out.append(alloc, unk);
+            } else {
+                return Error.UnknownToken;
+            }
+        } else if (self.vocab.get(node.piece)) |id| {
             try out.append(alloc, id);
         } else if (self.unk_token) |unk| {
             try out.append(alloc, unk);
@@ -305,6 +351,9 @@ const NodeO = struct {
     end: u32,
     prev: i32,
     next: i32,
+    /// See Node.is_bf / Node.bf_byte.
+    is_bf: bool = false,
+    bf_byte: u8 = 0,
 };
 
 fn bpeEncodePQWithOffsets(
@@ -319,14 +368,34 @@ fn bpeEncodePQWithOffsets(
     while (i < word.len) {
         const n = try std.unicode.utf8ByteSequenceLength(word[i]);
         if (i + n > word.len) return error.InvalidUtf8;
-        const node_idx: i32 = @intCast(nodes.items.len);
-        try nodes.append(alloc, .{
-            .piece = word[i .. i + n],
-            .start = @intCast(i),
-            .end = @intCast(i + n),
-            .prev = node_idx - 1,
-            .next = node_idx + 1,
-        });
+        const cp = word[i .. i + n];
+        if (self.byte_fallback and self.vocab.get(cp) == null) {
+            // Byte-fallback expansion (see bpeEncodePQ). Each byte gets
+            // the *same* enclosing-codepoint offset span, matching
+            // SentencePiece convention — the original text has no
+            // sub-byte position of its own.
+            for (cp) |b| {
+                const node_idx: i32 = @intCast(nodes.items.len);
+                try nodes.append(alloc, .{
+                    .piece = cp[0..1],
+                    .start = @intCast(i),
+                    .end = @intCast(i + n),
+                    .prev = node_idx - 1,
+                    .next = node_idx + 1,
+                    .is_bf = true,
+                    .bf_byte = b,
+                });
+            }
+        } else {
+            const node_idx: i32 = @intCast(nodes.items.len);
+            try nodes.append(alloc, .{
+                .piece = cp,
+                .start = @intCast(i),
+                .end = @intCast(i + n),
+                .prev = node_idx - 1,
+                .next = node_idx + 1,
+            });
+        }
         i += n;
     }
     if (nodes.items.len == 0) return .{
@@ -420,7 +489,10 @@ fn bpeEncodePQWithOffsets(
     }
     while (cur_idx >= 0) {
         const node = nodes.items[@intCast(cur_idx)];
-        const id = self.vocab.get(node.piece) orelse if (self.unk_token) |unk| unk else return Error.UnknownToken;
+        const id = if (node.is_bf)
+            self.byteTokenId(node.bf_byte) orelse (self.unk_token orelse return Error.UnknownToken)
+        else
+            self.vocab.get(node.piece) orelse (self.unk_token orelse return Error.UnknownToken);
         try ids_out.append(alloc, id);
         try off_out.append(alloc, .{ node.start, node.end });
         cur_idx = node.next;

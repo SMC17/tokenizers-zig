@@ -13,12 +13,23 @@ DistilBERT), and Unigram (T5 / mBART / XLM-R) model families.
 
 ## Status
 
-**v0.26 — full pipeline, all three model families, 6-subcommand
+**v0.27 — full pipeline, all three model families, 6-subcommand
 tokenize CLI, batch-with-types APIs, full HF `Encoding` struct
-parity, sub-token offsets, property-fuzz-tested. 189 tests pass
-+ 600-iter invariant fuzz clean on all 3 real-tokenizer fixtures.**
+parity, sub-token offsets, property-fuzz-tested. 191 tests: 162 pass
+in a clean clone, 29 real-model tests skip without the HF fixture
+files (not distributed here — see Reproducible setup below) + 600-iter
+invariant fuzz on all 3 real-tokenizer fixtures.**
 
-**Formal Proof:** [Bit-Identical Tokenization: Formal Verification and Systems Performance (PDF)](parity_proof.pdf)
+**Differential correctness vs HF Rust — see [COMPATIBILITY.md](COMPATIBILITY.md).**
+`parity_proof.pdf` (2026-06-13) claims universal bit-identical parity;
+that claim is false — a 39-line adversarial corpus found real
+mismatches on all three model families (root-caused: SentencePiece
+byte-fallback was unimplemented, and Unigram never collapsed
+consecutive-unknown runs). Both are now fixed: TinyLlama went to
+39/39 exact match, T5 to 36/39. BERT/WordPiece is unchanged at 33/39
+— five real gaps involving CJK, Cyrillic, Vietnamese, and astral-plane
+input, not yet root-caused. Full detail, reproduction steps, and the
+open gaps are in COMPATIBILITY.md — read that before the PDF.
 
 ### Head-to-head vs HuggingFace Rust tokenizers
 
@@ -187,12 +198,17 @@ AGPL-3.0-or-later. See `LICENSE`.
   shifts (the constant-factor overhead of HF's Rust crate amortises),
   but the architectural win (no GIL, no Python boundary, no
   ICU-via-FFI for normalization) is expected to persist.
+- **Not bit-identical to HF Rust on all input.** See
+  [COMPATIBILITY.md](COMPATIBILITY.md): BERT/WordPiece has 5 known
+  mismatches (CJK, Cyrillic, Vietnamese, astral-plane input) and
+  T5/Unigram has 3, none yet root-caused. Do not treat `parity_proof.pdf`
+  as current — it predates this finding.
 
 ## Reproducible setup
 
 ```
 nix develop        # Zig 0.16.0 + jq + curl + gawk + python3(websockets)
-zig build test     # 189/189 expected
+zig build test     # 191 tests; 162 pass without HF fixtures, 29 skip
 ```
 
 The repo's `flake.nix` pins exact dep versions (see `STATUS.md`).
