@@ -33,11 +33,11 @@ any mismatch — timing is not part of the pass criterion.
 
 ## Current results (2026-07-12, commit at HEAD)
 
-| Fixture | Family | Exact match | Before this pass |
+| Fixture | Family | Exact match | Before any fixes |
 |---|---|---|---|
 | TinyLlama-1.1B | BPE + SentencePiece | **39/39 (100%)** | 27/39 |
 | T5-base | Unigram | **36/39 (92%)** | 25/39 |
-| BERT-base-uncased | WordPiece | 33/39 (85%) | 33/39 (unchanged) |
+| BERT-base-uncased | WordPiece | **37/39 (95%)** | 33/39 |
 
 ## Root causes found and fixed
 
@@ -61,21 +61,57 @@ any mismatch — timing is not part of the pass criterion.
    byte-fallback tokens at all — `model.byte_fallback` is unset in the
    T5 fixture) went from 25/39 to 36/39 on this fix alone.
 
+3. **`normalizer.zig`'s `.lowercase` was ASCII-only.** Diffed
+   normalized text directly against HF Rust (`bench/norm_dump.zig` +
+   `bench/diff_rust/src/bin/norm_dump.rs`, isolating normalization from
+   subword matching) and found HF's real BertNormalizer lowercases
+   Cyrillic and Greek too (`char.is_uppercase()` in Rust, not an ASCII
+   table). Added codepoint-aware case folding for those two scripts
+   (verified — not a general Unicode case-folding table; other scripts
+   are unverified and not claimed). Caught and fixed a regression this
+   introduced (broke ASCII lowercasing) via the existing unit-test
+   suite before it shipped.
+
+4. **`isControl` (clean_text) didn't strip zero-width format
+   characters.** HF's real `is_control` is `char.is_other()` — the
+   general Unicode category grouping Cc+Cf+Cn+Co — not a hardcoded
+   control-char range. Added the Cf ranges that matter in practice
+   (ZWSP/ZWNJ/ZWJ, bidi controls, BOM, soft hyphen), verified against
+   the corpus's zero-width-joiner test line matching exactly. Cn/Co are
+   not covered.
+
+5. **`stripAccents` only covered U+0300–U+036F, and NFD had no
+   Hiragana/Katakana decomposition entries at all.** HF's real
+   `strip_accents` is `!c.is_mark_nonspacing()` (general Mn category).
+   Two fixes: added the Combining Katakana-Hiragana Voiced/Semi-Voiced
+   Sound Marks (U+3099/U+309A) to `isCombiningMark`, and — the actual
+   root cause — added the full Hiragana+Katakana dakuten/handakuten
+   decomposition table to `unicode_norm.zig`'s NFD table (it had zero
+   kana entries; "で" never decomposed to "て"+U+3099 in the first
+   place, so there was nothing for strip_accents to strip). Also added
+   the Thai combining-mark range (U+0E31, U+0E34–U+0E3A, U+0E47–U+0E4E)
+   after diffing normalized Thai text found the exact stripped
+   codepoints empirically rather than guessing from Unicode charts.
+
 ## Known open gaps (not yet fixed)
 
-- **T5, 3 remaining mismatches** (lines with a Python code snippet,
-  the zero-width-joiner test, and a Gothic/astral-plane + emoji-ZWJ
-  test): token-level divergences not explained by unk-collapse or
-  byte-fallback — likely a Viterbi scoring or normalizer interaction
-  specific to zero-width/astral-plane input. Not root-caused yet.
-- **BERT/WordPiece, 5 mismatches, unchanged by this pass**: Japanese
-  (mixed hiragana/katakana/kanji), Cyrillic, Vietnamese (heavy
-  combining/precomposed diacritics), and a Gothic/astral-plane + ZWJ
-  emoji line. WordPiece has no byte-fallback concept in HF's
-  implementation, so this is a separate, unexplored bug class —
-  probably in `normalizer.zig` / `unicode_norm.zig`'s handling of
-  combining marks or multi-codepoint grapheme clusters, not yet
-  investigated.
+- **BERT/WordPiece, 2 remaining mismatches**: a currency/number line
+  (£15.00 tail — normalized text is byte-identical between Zig and
+  Rust, so this is a genuine WordPiece greedy-match divergence, not a
+  normalizer issue) and Vietnamese (normalized text still differs —
+  Vietnamese precomposed characters need *recursive* NFD decomposition
+  to fully separate base letter + tone mark + circumflex/horn, e.g.
+  "ệ" decomposes to "ê"+dot-below, and "ê" itself further decomposes to
+  "e"+circumflex; the current NFD table appears to do single-level
+  decomposition only). Not root-caused to the exact code path yet.
+- **T5/Unigram, 3 remaining mismatches**: NOT the same bug class as
+  BERT — T5's `tokenizer.json` specifies `"normalizer": {"type":
+  "Precompiled", "precompiled_charsmap": ...}`, SentencePiece's own
+  binary charsmap normalizer format, entirely separate from
+  BertNormalizer's Sequence-of-named-steps. None of the fixes above
+  touch this path. Whether Zig implements `Precompiled` at all (vs.
+  treating it as identity) is not yet checked — that's the next
+  question, not a normalizer-table gap like the BERT fixes above.
 
 ## What this means for the README claims
 

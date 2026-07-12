@@ -167,4 +167,22 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| run_diff.addArgs(args);
     const diff_step = b.step("diff-dump", "Dump token IDs for a fixture+corpus (Zig side of differential test)");
     diff_step.dependOn(&run_diff.step);
+
+    // Normalizer-only dump: isolates whether a differential mismatch
+    // comes from normalization vs. the model's subword matching.
+    const norm_mod = b.createModule(.{
+        .root_source_file = b.path("bench/norm_dump.zig"),
+        .target = target,
+        .optimize = .ReleaseFast,
+    });
+    norm_mod.addImport("tokenizers", mod);
+    const norm_exe = b.addExecutable(.{
+        .name = "norm-dump",
+        .root_module = norm_mod,
+    });
+    const run_norm = b.addRunArtifact(norm_exe);
+    run_norm.has_side_effects = true;
+    if (b.args) |args| run_norm.addArgs(args);
+    const norm_step = b.step("norm-dump", "Dump normalized text for a fixture+corpus (Zig side of normalizer-only diff)");
+    norm_step.dependOn(&run_norm.step);
 }
