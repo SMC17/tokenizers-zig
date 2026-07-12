@@ -16,9 +16,12 @@ DistilBERT), and Unigram (T5 / mBART / XLM-R) model families.
 **v0.27 — full pipeline, all three model families, 6-subcommand
 tokenize CLI, batch-with-types APIs, full HF `Encoding` struct
 parity, sub-token offsets, property-fuzz-tested. 191 tests: 162 pass
-in a clean clone, 29 real-model tests skip without the HF fixture
-files (not distributed here — see Reproducible setup below) + 600-iter
-invariant fuzz on all 3 real-tokenizer fixtures.**
+in a clean clone; 29 real-model tests (BERT / T5 / TinyLlama) skip
+because the HF `tokenizer.json` fixtures are not distributed here. To
+enable them, place the upstream `tokenizer.json` files in
+`tests/fixtures/` under the names the tests expect (e.g.
+`bert-base-uncased-tokenizer.json`). The 600-iter invariant fuzz also
+requires those fixtures.**
 
 **Differential correctness vs HF Rust — see [COMPATIBILITY.md](COMPATIBILITY.md).**
 `parity_proof.pdf` (2026-06-13) claims universal bit-identical parity;
@@ -149,7 +152,7 @@ Same code works against BPE, WordPiece, or Unigram tokenizer.json —
 ## Build
 
 ```sh
-zig build test                              # 189 tests + 600-iter property fuzz
+zig build test                              # 191 tests (29 skip without HF fixtures)
 zig build test-fuzz                          # standalone fuzz (BERT/T5/TinyLlama × 200 random texts)
 zig build tokenize                          # build tokenize CLI (6 subcommands)
 zig build bench                             # synthetic encode throughput
