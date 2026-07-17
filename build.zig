@@ -98,7 +98,7 @@ pub fn build(b: *std.Build) void {
         .name = "tokenize",
         .root_module = tok_mod,
     });
-    
+
     if (optimize != .Debug) {
         tok_exe.root_module.strip = true;
     }
