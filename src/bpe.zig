@@ -289,8 +289,8 @@ fn bpeEncodePQ(self: *const Model, alloc: std.mem.Allocator, word: []const u8) !
         // Merge: allocate combined piece in arena, splice DLL.
         const aa = self.arena.allocator();
         const merged = try aa.alloc(u8, left.piece.len + right.piece.len);
-        @memcpy(merged[0 .. left.piece.len], left.piece);
-        @memcpy(merged[left.piece.len ..], right.piece);
+        @memcpy(merged[0..left.piece.len], left.piece);
+        @memcpy(merged[left.piece.len..], right.piece);
         left.piece = merged;
         left.next = right.next;
         if (right.next >= 0) {
@@ -463,8 +463,8 @@ fn bpeEncodePQWithOffsets(
 
         const aa = self.arena.allocator();
         const merged = try aa.alloc(u8, left.piece.len + right.piece.len);
-        @memcpy(merged[0 .. left.piece.len], left.piece);
-        @memcpy(merged[left.piece.len ..], right.piece);
+        @memcpy(merged[0..left.piece.len], left.piece);
+        @memcpy(merged[left.piece.len..], right.piece);
         left.piece = merged;
         left.end = right.end; // merged range absorbs right's end
         left.next = right.next;
@@ -758,7 +758,7 @@ test "BPE — chained merges (3 pieces → 1)" {
             .{ .token = "hell", .id = 6 },
         },
         &.{
-            .{ .left = "h", .right = "e", .rank = 0 },  // best
+            .{ .left = "h", .right = "e", .rank = 0 }, // best
             .{ .left = "l", .right = "l", .rank = 1 },
             .{ .left = "he", .right = "ll", .rank = 2 },
         },
