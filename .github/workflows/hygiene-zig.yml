@@ -1,0 +1,17 @@
+# Consumer of SMC17/stax-hygiene reusable Zig test.
+name: Hygiene Zig (reusable)
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  zig-test:
+    uses: SMC17/stax-hygiene/.github/workflows/reusable-zig-test.yml@main
+    with:
+      zig-version: '0.16.0'
+      test-args: '--summary all'
+      fmt-paths: 'src build.zig'

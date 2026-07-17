@@ -65,7 +65,7 @@ inline fn buildBoundariesUtf8(
         i += n;
         char_count += 1;
     }
-    
+
     const out: []u32 = if (char_count + 1 <= MAX_BOUNDARIES)
         stack_boundaries[0 .. char_count + 1]
     else blk: {
@@ -73,7 +73,7 @@ inline fn buildBoundariesUtf8(
         heap_boundaries.* = hb;
         break :blk hb;
     };
-    
+
     out[0] = 0;
     i = 0;
     var b_idx: u32 = 1;
