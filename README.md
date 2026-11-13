@@ -62,8 +62,9 @@ enable them, place the upstream `tokenizer.json` files in
 requires those fixtures.**
 
 **Differential correctness vs HF Rust — see [COMPATIBILITY.md](COMPATIBILITY.md).**
-`parity_proof.pdf` (2026-06-13) claims universal bit-identical parity;
-that claim is false — a 39-line adversarial corpus found real
+An earlier write-up (`parity_proof.pdf`, June 2026, removed in November
+and kept in git history) claimed universal bit-identical parity; that
+claim was false — a 39-line adversarial corpus found real
 mismatches on all three model families. Root-caused and fixed 6 bugs:
 SentencePiece byte-fallback was unimplemented (TinyLlama → **39/39**);
 Unigram never collapsed consecutive-unknown runs (T5 → **36/39**); and
@@ -229,17 +230,16 @@ AGPL-3.0-or-later. See `LICENSE`.
 - **Regex / Split pre-tokenizers.** GPT-2 word-boundary splitting is
   partial — modern Llama/Qwen tokenizers work correctly; raw GPT-2 /
   RoBERTa may diverge from HF on long mixed-whitespace inputs.
-- **Single-platform tested** (x86_64-linux, Zig 0.16 Debug + ReleaseFast).
+- **Tested on two platforms**: x86_64 Linux and macOS on Apple silicon (fresh clone, 2026-11-12), Zig 0.16.
 - **Synthetic-fixture WordPiece bench.** The 5.3x ratio is measured
   against a 123-byte fixture; on longer documents the absolute ratio
-  shifts (the constant-factor overhead of HF's Rust crate amortises),
-  but the architectural win (no GIL, no Python boundary, no
-  ICU-via-FFI for normalization) is expected to persist.
+  shifts because HF's fixed per-call overhead is amortised. Longer-input
+  numbers are not measured yet.
 - **Not bit-identical to HF Rust on all input.** See
-  [COMPATIBILITY.md](COMPATIBILITY.md): BERT/WordPiece has 5 known
-  mismatches (CJK, Cyrillic, Vietnamese, astral-plane input) and
-  T5/Unigram has 3, none yet root-caused. Do not treat `parity_proof.pdf`
-  as current — it predates this finding.
+  [COMPATIBILITY.md](COMPATIBILITY.md): on the 39-input adversarial
+  corpus, BERT and TinyLlama match 39/39 and T5 matches 36/39. The 3 T5
+  gaps come from the unimplemented `Precompiled` normalizer
+  ([#11](https://github.com/SMC17/tokenizers-zig/issues/11)).
 
 ## Reproducible setup
 
@@ -248,6 +248,4 @@ nix develop        # Zig 0.16.0 + jq + curl + gawk + python3(websockets)
 zig build test     # 195 tests; 166 pass without HF fixtures, 29 skip
 ```
 
-The repo's `flake.nix` pins exact dep versions (see `STATUS.md`).
-`scripts/checkpoint.sh` + `.githooks/post-commit` auto-regenerate
-`NEXT.md` after every commit (opt-in: `git config core.hooksPath .githooks`).
+The repo's `flake.nix` pins exact dependency versions for `nix develop`.
