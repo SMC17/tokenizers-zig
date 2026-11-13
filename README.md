@@ -1,5 +1,7 @@
 # tokenizers-zig
 
+**[Status](STATUS.md) · [Roadmap](ROADMAP.md) · [Contributing](CONTRIBUTING.md) · [Issues](https://github.com/SMC17/tokenizers-zig/issues) · [All SMC17 work](https://github.com/users/SMC17/projects/16)**
+
 [![CI](https://github.com/SMC17/tokenizers-zig/actions/workflows/ci.yml/badge.svg)](https://github.com/SMC17/tokenizers-zig/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/SMC17/tokenizers-zig?sort=semver)](https://github.com/SMC17/tokenizers-zig/releases)
 [![License: AGPL-3.0-or-later](https://img.shields.io/badge/License-AGPL--3.0--or--later-blue.svg)](LICENSE)
