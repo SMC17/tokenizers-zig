@@ -20,3 +20,4 @@ bench/diff_rust/Cargo.lock
 .direnv/
 result
 result-*
+*.aux

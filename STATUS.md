@@ -1,6 +1,6 @@
 # Current acceptance — 12 November 2026
 
-The clean-source baseline passes 164/193 Zig tests with 29 real-fixture skips.
+The clean-source baseline passes 166/195 Zig tests with 29 real-fixture skips (fresh clone, macOS on Apple M2 Max, Zig 0.16.0, 2026-11-12).
 After the punctuation repair and two regressions: 166/195 pass, 29 skip.
 Seven differential-gate fault tests and the 48-input original WordPiece task
 pass. Current reference: HF tokenizers 0.21.4; token IDs only. The generated
