@@ -1,0 +1,12 @@
+{
+  "schema": 1,
+  "reference": "huggingface/tokenizers",
+  "version": "0.21.4",
+  "scope": "Original 32-token WordPiece vocabulary; BertNormalizer/BertPreTokenizer/single-input TemplateProcessing; token IDs only",
+  "cases": 48,
+  "fixture_sha256": "1b9c57d82831c2c6d145f39cb90b9db3ce557b8879f79a89d8eebe2485a93e9e",
+  "corpus_sha256": "4ecfebd0c85ae725f4718a26fa764ad237ea3e5149a99414cb5279870c153f92",
+  "expected_sha256": "293184201ebbad7127cc007f5909e152514524a23dee9f4f2ba2d6cbc9d979d3",
+  "source": "Original vocabulary and short original inputs; no model download or weights",
+  "release_claim": false
+}

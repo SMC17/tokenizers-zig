@@ -1,3 +1,16 @@
+# Current acceptance — 12 November 2026
+
+The clean-source baseline passes 164/193 Zig tests with 29 real-fixture skips.
+After the punctuation repair and two regressions: 166/195 pass, 29 skip.
+Seven differential-gate fault tests and the 48-input original WordPiece task
+pass. Current reference: HF tokenizers 0.21.4; token IDs only. The generated
+punctuation predicate observes every Unicode scalar (726 positives/156 ranges).
+Optional immutable real-tokenizer files run all 195 tests without skips. The
+unchanged 39-input corpus now matches BERT and TinyLlama 39/39, while T5 remains
+36/39 and the all-model comparison fails visibly. No real-model expectation,
+tag, visibility or speed measurement is changed.
+See docs/WORDPIECE_TASK.md; the older records below are historical.
+
 # STATUS
 
 **Version:** v0.26
