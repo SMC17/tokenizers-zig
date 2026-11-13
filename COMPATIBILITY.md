@@ -23,7 +23,7 @@ parity or new speedup is claimed. See docs/WORDPIECE_TASK.md.
 
 # Compatibility: differential correctness vs HuggingFace Rust
 
-`parity_proof.pdf` (2026-06-13) states the formal claim
+An earlier write-up, `parity_proof.pdf` (June 2026, since removed), stated the claim
 
     ∀s ∈ Σ*, EncodeZig(s) ≡ EncodeRust(s)
 

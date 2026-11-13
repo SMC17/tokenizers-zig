@@ -37,6 +37,3 @@ agent work (network + non-hermetic).
 
 Ask before release claims or changing real-tokenizer fixture expectations.
 
-## Hygiene
-
-Org templates: `SMC17/stax-hygiene`. Open issue backlog should stay labeled.
