@@ -1,0 +1,71 @@
+{
+  "schema": 1,
+  "project": "tokenizers-zig",
+  "visibility": "public",
+  "systems": [
+    "Darwin",
+    "Linux"
+  ],
+  "required_files": [
+    "README.md",
+    "LICENSE",
+    "docs/WORDPIECE_TASK.md",
+    "tests/fixtures/original-wordpiece.json",
+    "tests/fixtures/original-wordpiece.expected.jsonl",
+    "tests/corpus/original-wordpiece.jsonl"
+  ],
+  "task": "Compare exact token IDs on 48 original WordPiece inputs, with frozen pinned-reference output and a comparator that refuses invalid evidence.",
+  "steps": [
+    {
+      "name": "Zig tests with real-fixture skips disclosed",
+      "argv": [
+        "zig",
+        "build",
+        "test",
+        "-Doptimize=ReleaseSafe",
+        "--summary",
+        "all"
+      ],
+      "minimum_tests": 166
+    },
+    {
+      "name": "install comparison CLI",
+      "argv": [
+        "zig",
+        "build",
+        "-Doptimize=ReleaseSafe"
+      ]
+    },
+    {
+      "name": "differential gate fault tests",
+      "argv": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests",
+        "-p",
+        "test_diff_check.py"
+      ]
+    },
+    {
+      "name": "offline original fixture",
+      "argv": [
+        "python3",
+        "tools/check_wordpiece.py"
+      ],
+      "contains": "WORDPIECE_PARITY_OK rows=48"
+    }
+  ],
+  "bundle_paths": [
+    "zig-out/bin/diff-dump",
+    "zig-out/bin/tokenize"
+  ],
+  "limitations": [
+    "One original 32-token WordPiece vocabulary and 48 original short inputs; token IDs only.",
+    "29 real-model/fuzz fixture tests remain skipped; no universal or full-Encoding parity.",
+    "Punctuation table pins HF tokenizers 0.21.4 component behavior; normalization and future versions separate.",
+    "Public source/task; existing AGPL terms retained, no tagged release cut or performance claim."
+  ]
+}
