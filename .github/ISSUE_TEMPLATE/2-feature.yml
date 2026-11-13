@@ -1,0 +1,25 @@
+name: Feature or improvement
+description: Propose something new or better.
+labels: ["type: feature", "status: needs-triage"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What you are trying to do and what gets in the way today.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: What you would change. Alternatives you considered are welcome.
+    validations:
+      required: true
+  - type: textarea
+    id: done
+    attributes:
+      label: How we know it is done
+      description: The test, command or measurement that would show it works.
+    validations:
+      required: true
