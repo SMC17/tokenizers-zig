@@ -1,0 +1,30 @@
+name: Challenge a claim
+description: A number, ratio or statement in this repo does not hold up when you check it.
+labels: ["type: claim", "status: needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Every public claim here should come with a command that reproduces it. If one does not hold on your machine, that is a bug in the claim, and this is the place to report it. Results that disagree are as welcome as ones that agree.
+  - type: input
+    id: where
+    attributes:
+      label: Which claim
+      description: Link to the file and line, or quote it.
+    validations:
+      required: true
+  - type: textarea
+    id: measured
+    attributes:
+      label: What you measured
+      description: Your numbers, and the command you ran to get them.
+      render: shell
+    validations:
+      required: true
+  - type: input
+    id: env
+    attributes:
+      label: Commit, toolchain, machine
+      placeholder: "e.g. 3f2a9c1, Zig 0.16.0 ReleaseFast, Ryzen 7950X Linux"
+    validations:
+      required: true
