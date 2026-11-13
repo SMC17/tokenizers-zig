@@ -23,3 +23,27 @@ jobs:
         # intentionally NOT run in CI (require cargo + crates.io fetch
         # and aren't reproducible quickly). Run zig build test only.
         run: zig build test --summary all
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Differential gate refusal tests
+        run: python3 -m unittest discover -s tests -p test_diff_check.py
+      - name: Install comparison CLI
+        run: zig build -Doptimize=ReleaseSafe
+      - name: Frozen original WordPiece fixture
+        run: python3 tools/check_wordpiece.py
+      - name: Install pinned upstream oracle
+        run: python3 -m pip install --only-binary=:all: -r tools/requirements-oracle.txt
+      - name: Live upstream comparison and punctuation-table identity
+        run: |
+          python3 tools/check_wordpiece.py --live
+          python3 tools/generate_bert_punctuation.py
+      - name: Fetch pinned real tokenizer JSON files (no weights)
+        run: python3 tools/fetch_real_fixtures.py
+      - name: Real-fixture tests and specific model conformance
+        run: |
+          zig build test --summary all
+          python3 tools/check_real_parity.py --model bert
+          python3 tools/check_real_parity.py --model tinyllama
+        # T5's known Precompiled-normalizer mismatch remains documented.
+        # --model all reports it and exits nonzero; it is not a passing parity claim.
