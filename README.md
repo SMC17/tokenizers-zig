@@ -9,12 +9,50 @@ Zig 0.16 tokenizers compatible with the HuggingFace `tokenizer.json`
 format. Covers BPE (GPT-2 / Llama / Qwen / Mistral), WordPiece (BERT /
 DistilBERT), and Unigram (T5 / mBART / XLM-R) model families.
 
-## Status
+## Current bounded task — 12 November 2026
+
+The original 32-token WordPiece fixture now matches pinned Hugging Face
+`tokenizers==0.21.4` on all 48 short inputs. The eight-input regression matched
+only two inputs before the punctuation repair; all eight now agree. A generated
+predicate observes the reference's behavior over all 1,112,064 Unicode scalar
+values: 726 punctuation scalars in 156 ranges. Currency symbols and some CJK
+letters no longer split as punctuation, while Arabic/Indic punctuation does.
+
+```sh
+zig build test --summary all
+zig build -Doptimize=ReleaseSafe
+python3 -m unittest discover -s tests -p test_diff_check.py
+python3 tools/check_wordpiece.py
+```
+
+The current local gate passes 166 of 195 Zig tests; 29 real-model/fuzz tests
+remain skipped because their separate fixtures are absent. Seven Python gate
+fault tests pass. The offline task checks exact token IDs against frozen
+reference output; optional live verification uses the pinned wheel and fetches
+no models. See [the original fixture contract](docs/WORDPIECE_TASK.md).
+
+Empty dumps, duplicate line IDs, malformed token IDs and matching errors now
+fail the comparator. Earlier code reported `0/0` empty dumps as success.
+
+This task covers token IDs for one explicit vocabulary and the pinned BERT
+punctuation component. It does not certify BPE, Unigram, general normalization,
+offsets, every Encoding field, or current real-model parity. Existing fixture
+expectations remain unchanged; no release or visibility change is made.
+
+### Pinned real-model follow-up
+
+Optional `python3 tools/fetch_real_fixtures.py` downloads three immutable,
+checksum-verified tokenizer JSON files (about 3.7 MB total; no weights). With
+those files, all 195 tests pass. The existing 39-input corpus now matches
+BERT 39/39 and TinyLlama 39/39 against the pinned reference. T5 remains 36/39;
+`tools/check_real_parity.py --model all` reports the mismatches and fails.
+The files stay gitignored; existing real-fixture expectations are unchanged.
+See the task contract for exact commands and source identities.
+
+## Historical status and remaining model gaps
 
 **v0.27 — full pipeline, all three model families, 6-subcommand
-tokenize CLI, batch-with-types APIs, full HF `Encoding` struct
-parity, sub-token offsets, property-fuzz-tested. 193 tests: 164 pass
-in a clean clone on Zig 0.16.0 (2026-11-12, macOS aarch64); 29 real-model tests (BERT / T5 / TinyLlama) skip
+tokenize CLI, batch-with-types APIs, HF `Encoding` return fields, sub-token offsets, property-fuzz-tested. The current clean-source result is above; 29 real-model tests (BERT / T5 / TinyLlama) skip
 because the HF `tokenizer.json` fixtures are not distributed here. To
 enable them, place the upstream `tokenizer.json` files in
 `tests/fixtures/` under the names the tests expect (e.g.
@@ -31,33 +69,19 @@ BertNormalizer's lowercase was ASCII-only, its `clean_text` didn't
 strip zero-width joiners, its NFD table had zero Hiragana/Katakana
 decomposition entries, and NFD decomposition wasn't recursive (needed
 for Vietnamese's double-diacritic characters) (BERT → **38/39**).
-1 BERT gap (a currency-line WordPiece match, confirmed not a
-normalizer issue) and 3 T5 gaps (confirmed cause: T5 uses
+The historical BERT currency gap is resolved in the current pinned replay.
+Three T5 gaps remain (confirmed cause: T5 uses
 SentencePiece's separate `Precompiled`-charsmap normalizer, entirely
 unimplemented — falls through to a silent no-op rather than erroring,
 because erroring breaks loading T5 at all) remain open. Full detail,
 reproduction steps, and the open gaps are in COMPATIBILITY.md — read
 that before the PDF.
 
-### Head-to-head vs HuggingFace Rust tokenizers (historical, not remeasured)
+### Historical timing evidence
 
-These timings were recorded before v0.27 and have not been rerun on the
-current commit. Treat them as a lead to reproduce, not a current claim.
-
-| Family | Zig | Rust HF 0.21 | Ratio |
-|---|---|---|---|
-| BPE+SP (TinyLlama) | ~45 μs | ~46 μs | ~1.0x (parity) |
-| **WordPiece (BERT-base-uncased)** | **~15 μs** | **~82 μs** | **~5.3x Zig faster** |
-| Unigram (T5-base) | ~38 μs | ~44 μs | ~1.16x Zig faster |
-
-Same 123-byte fixture, same canonical token output, same hardware
-(consumer Linux, Ryzen-class, ReleaseFast). Bench harnesses at
-`bench/bench_rust_bert/`, `bench/bench_rust_t5/`, `bench/bench_rust/`.
-
-The WordPiece 5.3x ratio is pure-Zig greedy-longest-match beating HF
-Rust on the BERT pipeline. BPE is parity (priority-queue O(n log n)
-merge loop matches Rust's optimised path). Unigram is +16% on
-Viterbi DP.
+The older timing tables remain in STATUS.md. They have not been remeasured in
+this acceptance run and are not a current speedup claim. Compatibility failures
+must be resolved separately from timing a single successful input.
 
 ### Real-tokenizer canonical IDs verified
 
@@ -160,7 +184,7 @@ Same code works against BPE, WordPiece, or Unigram tokenizer.json —
 ## Build
 
 ```sh
-zig build test                              # 193 tests (29 skip without HF fixtures)
+zig build test                              # 195 tests (29 skip without HF fixtures)
 zig build test-fuzz                          # standalone fuzz (BERT/T5/TinyLlama × 200 random texts)
 zig build tokenize                          # build tokenize CLI (6 subcommands)
 zig build bench                             # synthetic encode throughput
@@ -219,7 +243,7 @@ AGPL-3.0-or-later. See `LICENSE`.
 
 ```
 nix develop        # Zig 0.16.0 + jq + curl + gawk + python3(websockets)
-zig build test     # 193 tests; 164 pass without HF fixtures, 29 skip
+zig build test     # 195 tests; 166 pass without HF fixtures, 29 skip
 ```
 
 The repo's `flake.nix` pins exact dep versions (see `STATUS.md`).

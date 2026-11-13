@@ -154,7 +154,7 @@ pub fn build(b: *std.Build) void {
     const diff_mod = b.createModule(.{
         .root_source_file = b.path("bench/diff_dump.zig"),
         .target = target,
-        .optimize = .ReleaseFast,
+        .optimize = optimize,
     });
     diff_mod.addImport("tokenizers", mod);
     const diff_exe = b.addExecutable(.{
