@@ -2143,52 +2143,12 @@ pub fn applyByteFallback(alloc: std.mem.Allocator, text: []const u8) ![]u8 {
     return out.toOwnedSlice(alloc);
 }
 
-/// Unicode punctuation classifier — returns true if codepoint `cp` is
-/// in a punctuation block. Covers ASCII, Latin-1 supplement, General
-/// Punctuation, Supplemental Punctuation, CJK Symbols, Vertical Forms,
-/// CJK Compatibility Forms, Small Form Variants, and Halfwidth/
-/// Fullwidth Forms (punctuation subset).
-///
-/// Not a full Unicode "P" category — uses range-based approximation
-/// covering ~99% of real-world punctuation. Codepoints in the Cyrillic
-/// / Arabic / Indic punctuation blocks are NOT detected; v0.5 work if
-/// real multilingual fixtures demand it.
+/// BERT punctuation predicate observed against HF tokenizers 0.21.4.
+/// Whole-block approximations incorrectly split currency signs and letters,
+/// and missed Arabic/Indic punctuation. Keep the generated scalar table pinned
+/// separately from the still-limited normalization pipeline.
 pub fn isUnicodePunct(cp: u21) bool {
-    return switch (cp) {
-        // ASCII punctuation (subset of !–/, :–@, [–`, {–~)
-        '!'...'/', ':'...'@', '['...'`', '{'...'~' => true,
-        // Latin-1 supplement: ¡ (U+00A1) through ¿ (U+00BF) selected
-        0x00A1...0x00A9 => true,
-        0x00AB => true,
-        0x00AC => true,
-        0x00AD => true,
-        0x00AE => true,
-        0x00AF => true,
-        0x00B0 => true,
-        0x00B1 => true,
-        0x00B4 => true,
-        0x00B6...0x00B8 => true,
-        0x00BB => true,
-        0x00BF => true,
-        // General Punctuation (U+2000–U+206F)
-        0x2000...0x206F => true,
-        // Supplemental Punctuation
-        0x2E00...0x2E7F => true,
-        // CJK Symbols and Punctuation
-        0x3000...0x303F => true,
-        // Vertical Forms
-        0xFE10...0xFE1F => true,
-        // CJK Compatibility Forms
-        0xFE30...0xFE4F => true,
-        // Small Form Variants
-        0xFE50...0xFE6F => true,
-        // Halfwidth and Fullwidth Forms — punctuation subset
-        0xFF01...0xFF0F => true,
-        0xFF1A...0xFF20 => true,
-        0xFF3B...0xFF40 => true,
-        0xFF5B...0xFF65 => true,
-        else => false,
-    };
+    return @import("bert_punctuation.zig").contains(cp);
 }
 
 /// Encode a single whitespace-chunk into ids, splitting on Unicode
@@ -3670,4 +3630,24 @@ test "Model — vocabCount works across all variants" {
     var tok = try fromJson(testing.allocator, bpe_json);
     defer tok.deinit();
     try testing.expectEqual(@as(usize, 3), tok.model.vocabCount());
+}
+
+test "BERT punctuation preserves currency symbols and letters" {
+    for ([_]u21{ 0x00A3, 0x00A9, 0x20AC, 0x3005, 0x3000 }) |cp| {
+        try std.testing.expect(!isUnicodePunct(cp));
+    }
+    for ([_]u21{ '$', '+', '!', 0x060C, 0x0964, 0x3001 }) |cp| {
+        try std.testing.expect(isUnicodePunct(cp));
+    }
+}
+
+test "WordPiece keeps currency runs and splits Arabic punctuation" {
+    const json =
+        \\{"model":{"type":"WordPiece","vocab":{"[UNK]":0,"£15":1,".":2,"00":3,"a£b":4,"a":5,"b":6,"،":7},"unk_token":"[UNK]"},"pre_tokenizer":{"type":"BertPreTokenizer"}}
+    ;
+    var tok = try fromJson(std.testing.allocator, json);
+    defer tok.deinit();
+    const ids = try tok.encode(std.testing.allocator, "£15.00 a£b a،b");
+    defer std.testing.allocator.free(ids);
+    try std.testing.expectEqualSlices(u32, &.{ 1, 2, 3, 4, 5, 7, 6 }, ids);
 }

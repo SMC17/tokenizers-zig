@@ -1,3 +1,26 @@
+# Current original-fixture check — 12 November 2026
+
+An original 32-token WordPiece fixture and 48 short inputs match HF tokenizers
+0.21.4 exactly. The eight-input currency/CJK/Arabic/Indic regression improved
+from 2/8 to 8/8. The cause is the BERT pre-tokenizer's block-based punctuation
+approximation: it split £, © and 々 and missed Arabic comma/Indic danda.
+This is distinct from normalization and from WordPiece's greedy matching.
+
+The generated predicate probes all 1,112,064 Unicode scalars against the pinned
+reference pre-tokenizer, yielding 726 punctuation scalars in 156 ranges.
+It pins that component's behavior, not the entire pipeline or future Unicode
+versions. `tools/check_wordpiece.py --live` checks frozen IDs against the exact
+wheel version; `tools/generate_bert_punctuation.py` checks table identity.
+
+The optional immutable tokenizer JSON replay now passes 195/195 existing tests,
+with no fixture skips. On the unchanged 39-input corpus, live reference scores
+are BERT 39/39, TinyLlama 39/39 and T5 36/39. T5 still differs on zero-based lines
+18, 19 and 30; --model all returns failure. The historical scores below remain
+as history. No fixture expectations were altered and no universal/Encoding-field
+parity or new speedup is claimed. See docs/WORDPIECE_TASK.md.
+
+---
+
 # Compatibility: differential correctness vs HuggingFace Rust
 
 `parity_proof.pdf` (2026-06-13) states the formal claim
@@ -109,12 +132,10 @@ any mismatch — timing is not part of the pass criterion.
 
 ## Known open gaps (not yet fixed)
 
-- **BERT/WordPiece, 1 remaining mismatch**: a currency/number line
-  (£15.00 tail — normalized text is byte-identical between Zig and
-  Rust, so this is confirmed a genuine WordPiece greedy-match
-  divergence, not a normalizer issue). Not root-caused to the exact
-  code path yet — needs a WordPiece-algorithm trace, not normalizer
-  diffing.
+- **Historical BERT currency gap — resolved in the pinned 12 November replay.**
+  Normalized text already agreed; the original 32-token fixture isolated
+  pre-tokenizer punctuation classification rather than greedy matching.
+  The unchanged 39-input BERT corpus now passes 39/39 on the pinned fixture.
 - **T5/Unigram, 3 remaining mismatches — confirmed cause: `Precompiled`
   is silently a no-op.** T5's `tokenizer.json` specifies
   `"normalizer": {"type": "Precompiled", "precompiled_charsmap": ...}`
