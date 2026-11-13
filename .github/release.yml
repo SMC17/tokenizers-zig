@@ -1,0 +1,14 @@
+changelog:
+  exclude:
+    labels: ["status: wontfix"]
+  categories:
+    - title: Breaking changes
+      labels: ["breaking"]
+    - title: Fixes
+      labels: ["type: bug", "type: claim"]
+    - title: Features
+      labels: ["type: feature", "type: perf"]
+    - title: Documentation
+      labels: ["type: docs"]
+    - title: Other changes
+      labels: ["*"]

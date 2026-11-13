@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/SMC17/tokenizers-zig/security/advisories/new
+    about: Please report security issues privately, not as an issue.
+  - name: How work is tracked across SMC17
+    url: https://github.com/SMC17/SMC17/blob/main/STANDARDS.md
+    about: Labels, proof levels, and what "done" means in every repo.
