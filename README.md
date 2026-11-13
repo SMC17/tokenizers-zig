@@ -1,7 +1,5 @@
 # tokenizers-zig
 
-**`tier-1 reproducible substrate`** · `flake.nix` · `scripts/checkpoint.sh` · `.githooks/post-commit`
-
 [![CI](https://github.com/SMC17/tokenizers-zig/actions/workflows/ci.yml/badge.svg)](https://github.com/SMC17/tokenizers-zig/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/SMC17/tokenizers-zig?sort=semver)](https://github.com/SMC17/tokenizers-zig/releases)
 [![License: AGPL-3.0-or-later](https://img.shields.io/badge/License-AGPL--3.0--or--later-blue.svg)](LICENSE)
@@ -15,8 +13,8 @@ DistilBERT), and Unigram (T5 / mBART / XLM-R) model families.
 
 **v0.27 — full pipeline, all three model families, 6-subcommand
 tokenize CLI, batch-with-types APIs, full HF `Encoding` struct
-parity, sub-token offsets, property-fuzz-tested. 191 tests: 162 pass
-in a clean clone; 29 real-model tests (BERT / T5 / TinyLlama) skip
+parity, sub-token offsets, property-fuzz-tested. 193 tests: 164 pass
+in a clean clone on Zig 0.16.0 (2026-11-12, macOS aarch64); 29 real-model tests (BERT / T5 / TinyLlama) skip
 because the HF `tokenizer.json` fixtures are not distributed here. To
 enable them, place the upstream `tokenizer.json` files in
 `tests/fixtures/` under the names the tests expect (e.g.
@@ -41,7 +39,10 @@ because erroring breaks loading T5 at all) remain open. Full detail,
 reproduction steps, and the open gaps are in COMPATIBILITY.md — read
 that before the PDF.
 
-### Head-to-head vs HuggingFace Rust tokenizers
+### Head-to-head vs HuggingFace Rust tokenizers (historical, not remeasured)
+
+These timings were recorded before v0.27 and have not been rerun on the
+current commit. Treat them as a lead to reproduce, not a current claim.
 
 | Family | Zig | Rust HF 0.21 | Ratio |
 |---|---|---|---|
@@ -159,7 +160,7 @@ Same code works against BPE, WordPiece, or Unigram tokenizer.json —
 ## Build
 
 ```sh
-zig build test                              # 191 tests (29 skip without HF fixtures)
+zig build test                              # 193 tests (29 skip without HF fixtures)
 zig build test-fuzz                          # standalone fuzz (BERT/T5/TinyLlama × 200 random texts)
 zig build tokenize                          # build tokenize CLI (6 subcommands)
 zig build bench                             # synthetic encode throughput
@@ -218,7 +219,7 @@ AGPL-3.0-or-later. See `LICENSE`.
 
 ```
 nix develop        # Zig 0.16.0 + jq + curl + gawk + python3(websockets)
-zig build test     # 191 tests; 162 pass without HF fixtures, 29 skip
+zig build test     # 193 tests; 164 pass without HF fixtures, 29 skip
 ```
 
 The repo's `flake.nix` pins exact dep versions (see `STATUS.md`).
