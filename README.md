@@ -249,3 +249,7 @@ zig build test     # 195 tests; 166 pass without HF fixtures, 29 skip
 ```
 
 The repo's `flake.nix` pins exact dependency versions for `nix develop`.
+
+## Unified C ABI, Python Wheel & WASM
+
+Core primitives from this repository are also cross-pollinated into **[SMC17/zinging (`zig-substrate`)](https://github.com/SMC17/zinging)** with C11 ABI bindings (`199` symbols), standalone Python wheels, JSON-RPC daemon (`substrate serve`), and `wasm32` builds.
