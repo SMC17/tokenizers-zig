@@ -1,0 +1,15 @@
+# tokenizers-zig (`SMC17/tokenizers-zig`)
+
+> HuggingFace tokenizer.json in Zig 0.16: BPE, WordPiece and Unigram, differential-tested against the Rust tokenizers.
+
+## Repository & Docs
+- **Repository**: https://github.com/SMC17/tokenizers-zig
+- [README](https://github.com/SMC17/tokenizers-zig/blob/main/README.md)
+- [AI Inference Zig Stack](https://sunlitmoon.online/lab/ai-inference-zig-stack.html)
+- [Compatibility](https://github.com/SMC17/tokenizers-zig/blob/main/COMPATIBILITY.md)
+- [Build](https://github.com/SMC17/tokenizers-zig/blob/main/build.zig) & [Flake](https://github.com/SMC17/tokenizers-zig/blob/main/flake.nix)
+- [Source](https://github.com/SMC17/tokenizers-zig/tree/main/src) & [Tests](https://github.com/SMC17/tokenizers-zig/tree/main/tests)
+
+## Ecosystem & Author
+- **Unified Substrate (`SMC17/zinging`)**: https://github.com/SMC17/zinging
+- **Author / Org**: https://github.com/SMC17
