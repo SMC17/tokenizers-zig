@@ -19,12 +19,24 @@ const tokenizers = @import("tokenizers");
 
 const N_ITERS_PER_FIXTURE = 200;
 
-fn loadTokenizer(alloc: std.mem.Allocator, io: std.Io, path: []const u8) !?tokenizers.Tokenizer {
-    var f = std.Io.Dir.cwd().openFile(io, path, .{ .mode = .read_only }) catch return null;
+fn loadTokenizerWithOptions(
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    path: []const u8,
+    opts: tokenizers.ParseOptions,
+) !?tokenizers.Tokenizer {
+    var f = std.Io.Dir.cwd().openFile(io, path, .{ .mode = .read_only }) catch |err| switch (err) {
+        error.FileNotFound => return null,
+        else => return err,
+    };
     f.close(io);
     const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, alloc, std.Io.Limit.limited(64 * 1024 * 1024));
     defer alloc.free(bytes);
-    return try tokenizers.fromJson(alloc, bytes);
+    return try tokenizers.fromJsonWithOptions(alloc, bytes, opts);
+}
+
+fn loadTokenizer(alloc: std.mem.Allocator, io: std.Io, path: []const u8) !?tokenizers.Tokenizer {
+    return loadTokenizerWithOptions(alloc, io, path, .{});
 }
 
 fn randomAsciiText(rng: *std.Random, buf: []u8) []const u8 {
@@ -133,7 +145,7 @@ test "fuzz — BERT-base-uncased invariants over 200 random texts" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
 
-    const maybe_tok = loadTokenizer(alloc, io, "tests/fixtures/bert-base-uncased-tokenizer.json") catch return;
+    const maybe_tok = try loadTokenizer(alloc, io, "tests/fixtures/bert-base-uncased-tokenizer.json");
     var tok = maybe_tok orelse return error.SkipZigTest;
     defer tok.deinit();
 
@@ -155,7 +167,9 @@ test "fuzz — T5-base invariants over 200 random texts" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
 
-    const maybe_tok = loadTokenizer(alloc, io, "tests/fixtures/t5-base-tokenizer.json") catch return;
+    const maybe_tok = try loadTokenizerWithOptions(alloc, io, "tests/fixtures/t5-base-tokenizer.json", .{
+        .allow_unsupported_normalizer = true,
+    });
     var tok = maybe_tok orelse return error.SkipZigTest;
     defer tok.deinit();
 
@@ -177,7 +191,7 @@ test "fuzz — TinyLlama invariants over 200 random texts" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
 
-    const maybe_tok = loadTokenizer(alloc, io, "tests/fixtures/tokenizer.json") catch return;
+    const maybe_tok = try loadTokenizer(alloc, io, "tests/fixtures/tokenizer.json");
     var tok = maybe_tok orelse return error.SkipZigTest;
     defer tok.deinit();
 
@@ -199,7 +213,7 @@ test "fuzz — BERT pair encodePairFull invariants over 100 pairs" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
 
-    const maybe_tok = loadTokenizer(alloc, io, "tests/fixtures/bert-base-uncased-tokenizer.json") catch return;
+    const maybe_tok = try loadTokenizer(alloc, io, "tests/fixtures/bert-base-uncased-tokenizer.json");
     var tok = maybe_tok orelse return error.SkipZigTest;
     defer tok.deinit();
 
@@ -223,7 +237,7 @@ test "fuzz — sequential vs parallel batch identical (BERT, 50 batches)" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
 
-    const maybe_tok = loadTokenizer(alloc, io, "tests/fixtures/bert-base-uncased-tokenizer.json") catch return;
+    const maybe_tok = try loadTokenizer(alloc, io, "tests/fixtures/bert-base-uncased-tokenizer.json");
     var tok = maybe_tok orelse return error.SkipZigTest;
     defer tok.deinit();
 

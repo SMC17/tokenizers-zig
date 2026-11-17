@@ -36,8 +36,18 @@ pub const Error = error{
     InvalidTokenizerJson,
     UnsupportedModelType,
     UnsupportedPreTokenizer,
+    UnsupportedNormalizer,
     MissingField,
     MismatchedBatchSize,
+};
+
+/// Options controlling `tokenizer.json` parsing behavior.
+pub const ParseOptions = struct {
+    /// When false (default), unsupported normalizers such as `Precompiled`
+    /// fail with `Error.UnsupportedNormalizer` instead of silently degrading
+    /// to `.none`. Set true to explicitly opt into degraded no-op normalizer
+    /// behavior.
+    allow_unsupported_normalizer: bool = false,
 };
 
 /// Tagged union over the model backends supported by this library.
@@ -1482,6 +1492,16 @@ pub const Tokenizer = struct {
 
 /// Build a Tokenizer from an in-memory tokenizer.json byte slice.
 pub fn fromJson(alloc: std.mem.Allocator, json_bytes: []const u8) !Tokenizer {
+    return fromJsonWithOptions(alloc, json_bytes, .{});
+}
+
+/// Build a Tokenizer from an in-memory tokenizer.json byte slice with explicit
+/// parsing options (e.g. opting into degraded mode for unsupported normalizers).
+pub fn fromJsonWithOptions(
+    alloc: std.mem.Allocator,
+    json_bytes: []const u8,
+    opts: ParseOptions,
+) !Tokenizer {
     const own_arena = try alloc.create(std.heap.ArenaAllocator);
     errdefer alloc.destroy(own_arena);
     own_arena.* = std.heap.ArenaAllocator.init(alloc);
@@ -1545,13 +1565,14 @@ pub fn fromJson(alloc: std.mem.Allocator, json_bytes: []const u8) !Tokenizer {
     } else {
         return Error.UnsupportedModelType;
     }
+    errdefer model.deinit();
 
     // Normalizer (optional)
     var norm_kind: normalizer.NormalizerKind = .none;
     var sp_marker: ?[]const u8 = null;
     if (root.get("normalizer")) |nv| {
         if (nv == .object) {
-            norm_kind = try parseNormalizer(aa, nv.object, &sp_marker);
+            norm_kind = try parseNormalizer(aa, nv.object, &sp_marker, opts);
         }
     }
 
@@ -2342,6 +2363,7 @@ fn parseNormalizer(
     aa: std.mem.Allocator,
     obj: std.json.ObjectMap,
     sp_marker_out: *?[]const u8,
+    opts: ParseOptions,
 ) !normalizer.NormalizerKind {
     const tv = obj.get("type") orelse return Error.InvalidTokenizerJson;
     if (tv != .string) return Error.InvalidTokenizerJson;
@@ -2379,7 +2401,7 @@ fn parseNormalizer(
         const sub_norms = try aa.alloc(normalizer.NormalizerKind, arr_v.array.items.len);
         for (arr_v.array.items, 0..) |item, i| {
             if (item != .object) return Error.InvalidTokenizerJson;
-            sub_norms[i] = try parseNormalizer(aa, item.object, sp_marker_out);
+            sub_norms[i] = try parseNormalizer(aa, item.object, sp_marker_out, opts);
         }
         return .{ .sequence = sub_norms };
     }
@@ -2434,19 +2456,16 @@ fn parseNormalizer(
         if (steps.items.len == 1) return steps.items[0];
         return .{ .sequence = try aa.dupe(normalizer.NormalizerKind, steps.items) };
     }
-    // "Precompiled" is SentencePiece's own binary-charsmap normalizer
-    // (used by every SentencePiece-based tokenizer.json: T5, mBART,
-    // ALBERT, XLNet, ...). It is not implemented here and falls
-    // through to `.none` below (no normalization applied) rather than
-    // erroring — hard-erroring was tried and reverted: it breaks
-    // loading T5 entirely (0/7 tests) for a model family where
-    // BertNormalizer-class fixes don't apply anyway, and where the
-    // encoder still produces mostly-correct output (36/39 on the
-    // differential corpus) despite the gap. Documented as an explicit
-    // known limitation in COMPATIBILITY.md rather than silently
-    // shipped — the honest fix here is documentation, not an API
-    // break that trades a working (if imperfect) T5 path for none.
-    return .none;
+    // Unsupported normalizers (including SentencePiece's binary-charsmap
+    // "Precompiled" normalizer used by T5, mBART, ALBERT, XLNet, ...) fail
+    // explicitly with Error.UnsupportedNormalizer by default instead of
+    // silently degrading to `.none`. Callers that explicitly want the
+    // degraded no-op path can opt in via
+    // `ParseOptions{ .allow_unsupported_normalizer = true }`.
+    if (opts.allow_unsupported_normalizer) {
+        return .none;
+    }
+    return Error.UnsupportedNormalizer;
 }
 
 // ============================================================================
@@ -3650,4 +3669,74 @@ test "WordPiece keeps currency runs and splits Arabic punctuation" {
     const ids = try tok.encode(std.testing.allocator, "£15.00 a£b a،b");
     defer std.testing.allocator.free(ids);
     try std.testing.expectEqualSlices(u32, &.{ 1, 2, 3, 4, 5, 7, 6 }, ids);
+}
+
+test "fromJson — Precompiled normalizer fails with UnsupportedNormalizer by default" {
+    const precompiled_json =
+        \\{
+        \\  "version": "1.0",
+        \\  "normalizer": {"type": "Precompiled", "precompiled_charsmap": "AAAA"},
+        \\  "model": {
+        \\    "type": "Unigram",
+        \\    "unk_id": 0,
+        \\    "vocab": [["<unk>", 0.0], ["hello", -1.0]]
+        \\  }
+        \\}
+    ;
+    try testing.expectError(Error.UnsupportedNormalizer, fromJson(testing.allocator, precompiled_json));
+
+    const seq_json =
+        \\{
+        \\  "version": "1.0",
+        \\  "normalizer": {
+        \\    "type": "Sequence",
+        \\    "normalizers": [
+        \\      {"type": "Lowercase"},
+        \\      {"type": "Precompiled", "precompiled_charsmap": "AAAA"}
+        \\    ]
+        \\  },
+        \\  "model": {
+        \\    "type": "Unigram",
+        \\    "unk_id": 0,
+        \\    "vocab": [["<unk>", 0.0], ["hello", -1.0]]
+        \\  }
+        \\}
+    ;
+    try testing.expectError(Error.UnsupportedNormalizer, fromJson(testing.allocator, seq_json));
+
+    const unknown_json =
+        \\{
+        \\  "version": "1.0",
+        \\  "normalizer": {"type": "FutureCustomNormalizer"},
+        \\  "model": {
+        \\    "type": "Unigram",
+        \\    "unk_id": 0,
+        \\    "vocab": [["<unk>", 0.0], ["hello", -1.0]]
+        \\  }
+        \\}
+    ;
+    try testing.expectError(Error.UnsupportedNormalizer, fromJson(testing.allocator, unknown_json));
+}
+
+test "fromJsonWithOptions — allow_unsupported_normalizer opts into degraded mode" {
+    const precompiled_json =
+        \\{
+        \\  "version": "1.0",
+        \\  "normalizer": {"type": "Precompiled", "precompiled_charsmap": "AAAA"},
+        \\  "model": {
+        \\    "type": "Unigram",
+        \\    "unk_id": 0,
+        \\    "vocab": [["<unk>", 0.0], ["hello", -1.0]]
+        \\  }
+        \\}
+    ;
+    var tok = try fromJsonWithOptions(testing.allocator, precompiled_json, .{
+        .allow_unsupported_normalizer = true,
+    });
+    defer tok.deinit();
+    try testing.expect(tok.normalizer == .none);
+
+    const ids = try tok.encode(testing.allocator, "hello");
+    defer testing.allocator.free(ids);
+    try testing.expectEqualSlices(u32, &.{1}, ids);
 }

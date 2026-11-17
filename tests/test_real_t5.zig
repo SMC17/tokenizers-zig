@@ -17,7 +17,9 @@ const fixture_path = "tests/fixtures/t5-base-tokenizer.json";
 fn loadTokenizer(alloc: std.mem.Allocator, io: std.Io) !tokenizers.Tokenizer {
     const bytes = try std.Io.Dir.cwd().readFileAlloc(io, fixture_path, alloc, std.Io.Limit.limited(64 * 1024 * 1024));
     defer alloc.free(bytes);
-    return tokenizers.fromJson(alloc, bytes);
+    return tokenizers.fromJsonWithOptions(alloc, bytes, .{
+        .allow_unsupported_normalizer = true,
+    });
 }
 
 fn skipIfMissing(io: std.Io) !void {
@@ -34,6 +36,16 @@ fn skipIfMissing(io: std.Io) !void {
         else => return err,
     };
     f.close(io);
+}
+
+test "real t5-base — fromJson rejects Precompiled normalizer by default" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    try skipIfMissing(io);
+
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, fixture_path, alloc, std.Io.Limit.limited(64 * 1024 * 1024));
+    defer alloc.free(bytes);
+    try std.testing.expectError(tokenizers.Error.UnsupportedNormalizer, tokenizers.fromJson(alloc, bytes));
 }
 
 test "real t5-base — parses with 32100 vocab, Unigram + Metaspace" {
